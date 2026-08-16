@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Globe } from './components/Globe'
+import { PerformanceOverlay } from './components/PerformanceOverlay'
 import { fetchCatalog } from './lib/api'
 import { createSatrec, getOrbitState } from './lib/orbit'
 import { advanceSimulatedTime } from './lib/simulationClock'
+import { filterCatalog, normalizeCatalog } from './lib/orbitalCatalog'
 import type { CatalogGroup, OmmRecord } from './lib/types'
 
 const GROUPS: Array<{ value: CatalogGroup; label: string }> = [
@@ -20,6 +22,8 @@ function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [simulatedAt, setSimulatedAt] = useState(() => new Date())
   const [speed, setSpeed] = useState(1)
+  const [objectKind, setObjectKind] = useState('ALL')
+  const [objectQuery, setObjectQuery] = useState('')
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
 
@@ -56,9 +60,14 @@ function App() {
     return () => window.clearInterval(timer)
   }, [speed])
 
+  const visibleObjects = useMemo(
+    () => filterCatalog(normalizeCatalog(objects).entries, objectKind, objectQuery).map((entry) => entry.omm),
+    [objects, objectKind, objectQuery],
+  )
+
   const selected = useMemo(
-    () => objects.find((item) => item.NORAD_CAT_ID === selectedId) ?? null,
-    [objects, selectedId],
+    () => visibleObjects.find((item) => item.NORAD_CAT_ID === selectedId) ?? null,
+    [visibleObjects, selectedId],
   )
 
   const selectedState = useMemo(() => {
@@ -78,17 +87,26 @@ function App() {
   return (
     <main className="app-shell">
       <Globe
-        objects={objects}
+        objects={visibleObjects}
         simulatedAt={simulatedAt}
         selectedId={selectedId}
         onSelect={setSelectedId}
       />
+      {new URLSearchParams(window.location.search).get('debug') === 'perf' && <PerformanceOverlay loaded={objects.length} visible={visibleObjects.length} />}
 
       <header className="topbar glass">
         <div>
           <p className="eyebrow">HUMAN SPACE ATLAS</p>
           <h1>Presença humana no espaço, em uma só visão.</h1>
         </div>
+        <div className="segmented">
+          {['ALL', 'PAYLOAD', 'ROCKET BODY', 'DEBRIS'].map((kind) => (
+            <button key={kind} className={objectKind === kind ? 'active' : ''} onClick={() => setObjectKind(kind)}>
+              {kind === 'ALL' ? 'Todos' : kind}
+            </button>
+          ))}
+        </div>
+        <input aria-label="Buscar objeto" placeholder="Buscar nome ou NORAD" value={objectQuery} onChange={(event) => setObjectQuery(event.target.value)} />
         <div className="live-status">
           <span className="live-dot" />
           <span>{status}</span>

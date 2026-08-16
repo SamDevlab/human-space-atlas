@@ -10,7 +10,9 @@ import {
   Viewer,
 } from 'cesium'
 import type { OmmRecord } from '../lib/types'
-import { createSatrec, getOrbitState, sampleOrbit, toCesiumHeightMeters } from '../lib/orbit'
+import { createSatrec, sampleOrbit, toCesiumHeightMeters } from '../lib/orbit'
+import type { WorkerCommand, WorkerResult } from '../workers/orbitProtocol'
+import { shouldApplyPositionResult } from '../workers/workerState'
 
 interface GlobeProps {
   objects: OmmRecord[]
@@ -25,18 +27,19 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
+  const workerRef = useRef<Worker | null>(null)
+  const generationRef = useRef(0)
+  const requestRef = useRef(0)
+  const latestAppliedRequestRef = useRef(0)
 
   const satrecs = useMemo(() => {
     const map = new Map<number, ReturnType<typeof createSatrec>>()
-    for (const object of objects) {
-      try {
-        map.set(object.NORAD_CAT_ID, createSatrec(object))
-      } catch {
-        // Ignore malformed public records rather than breaking the whole scene.
-      }
+    const selected = objects.find((object) => object.NORAD_CAT_ID === selectedId)
+    if (selected) {
+      try { map.set(selected.NORAD_CAT_ID, createSatrec(selected)) } catch { /* worker reports bulk parse failures */ }
     }
     return map
-  }, [objects])
+  }, [objects, selectedId])
 
   useEffect(() => {
     if (!containerRef.current || viewerRef.current) return
@@ -65,6 +68,9 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
     pointsRef.current = points
     viewerRef.current = viewer
 
+    const worker = new Worker(new URL('../workers/orbit.worker.ts', import.meta.url), { type: 'module' })
+    workerRef.current = worker
+
     const handler = new ScreenSpaceEventHandler(viewer.scene.canvas)
     handler.setInputAction((movement: { position: Cartesian2 }) => {
       const picked = viewer.scene.pick(movement.position)
@@ -75,10 +81,20 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
     return () => {
       handler.destroy()
       pointsRef.current = null
+      worker.postMessage({ type: 'DISPOSE' } satisfies WorkerCommand)
+      workerRef.current = null
       viewerRef.current = null
       viewer.destroy()
     }
   }, [onSelect])
+
+  useEffect(() => {
+    const worker = workerRef.current
+    if (!worker) return
+    const generation = generationRef.current + 1
+    generationRef.current = generation
+    worker.postMessage({ type: 'LOAD_CATALOG', generation, objects } satisfies WorkerCommand)
+  }, [objects])
 
   useEffect(() => {
     const points = pointsRef.current
@@ -99,31 +115,30 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
   }, [objects, selectedId])
 
   useEffect(() => {
+    const worker = workerRef.current
     const points = pointsRef.current
-    if (!points) return
-
-    for (let i = 0; i < objects.length; i += 1) {
-      const object = objects[i]
-      const point = points.get(i)
-      const satrec = satrecs.get(object.NORAD_CAT_ID)
-      if (!point || !satrec) continue
-
-      const state = getOrbitState(satrec, simulatedAt)
-      if (!state) {
-        point.show = false
-        continue
+    if (!worker || !points || objects.length === 0) return
+    const requestId = requestRef.current + 1
+    requestRef.current = requestId
+    const generation = generationRef.current
+    const onMessage = (event: MessageEvent<WorkerResult>) => {
+      const result = event.data
+      if (result.type !== 'POSITIONS' || result.generation !== generation || !shouldApplyPositionResult(result.requestId, latestAppliedRequestRef.current)) return
+      latestAppliedRequestRef.current = result.requestId
+      const pointById = new Map(objects.map((object, index) => [object.NORAD_CAT_ID, points.get(index)]))
+      for (let i = 0; i < result.ids.length; i += 1) {
+        const point = pointById.get(result.ids[i])
+        if (!point) continue
+        point.position = Cartesian3.fromDegrees(result.values[i * 3], result.values[i * 3 + 1], result.values[i * 3 + 2])
+        point.color = result.ids[i] === selectedId ? Color.CYAN : Color.WHITE
+        point.pixelSize = result.ids[i] === selectedId ? 10 : POINT_SIZE
+        point.show = true
       }
-
-      point.position = Cartesian3.fromDegrees(
-        state.longitudeDeg,
-        state.latitudeDeg,
-        toCesiumHeightMeters(state.altitudeKm),
-      )
-      point.color = object.NORAD_CAT_ID === selectedId ? Color.CYAN : Color.WHITE
-      point.pixelSize = object.NORAD_CAT_ID === selectedId ? 10 : POINT_SIZE
-      point.show = true
     }
-  }, [objects, satrecs, selectedId, simulatedAt])
+    worker.addEventListener('message', onMessage)
+    worker.postMessage({ type: 'PROPAGATE', generation, requestId, timeMs: simulatedAt.getTime() } satisfies WorkerCommand)
+    return () => worker.removeEventListener('message', onMessage)
+  }, [objects, selectedId, simulatedAt])
 
   useEffect(() => {
     const viewer = viewerRef.current

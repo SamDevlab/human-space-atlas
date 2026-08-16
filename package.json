@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b",
+    "perf:catalog": "node scripts/benchmark-orbit.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "check:server": "node --check server/index.mjs && node --check scripts/dev.mjs"

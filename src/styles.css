@@ -117,3 +117,17 @@ p { line-height: 1.5; color: #b8c2d9; }
   .time-controls { bottom: 10px; width: calc(100vw - 20px); }
   .source-note { display: none; }
 }
+.perf-overlay {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 10;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  color: #b9ffd7;
+  background: rgba(3, 12, 18, 0.88);
+  border: 1px solid rgba(91, 238, 166, 0.45);
+  border-radius: 8px;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
