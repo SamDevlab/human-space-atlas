@@ -4,6 +4,7 @@ import type { OmmRecord } from '../src/lib/types'
 import { shouldApplyPositionResult } from '../src/workers/workerState'
 import { generateSyntheticCatalog } from '../src/lib/syntheticCatalog'
 import { percentile, summarizeDurations } from '../src/lib/performanceStats'
+import { AutoRenderController, resolveRenderLimit, selectRenderSet } from '../src/lib/renderSet'
 
 const record = (id: number, type: string, name: string): OmmRecord => ({
   OBJECT_NAME: name, EPOCH: '2026-08-16T00:00:00.000Z', NORAD_CAT_ID: id,
@@ -46,5 +47,21 @@ describe('benchmark helpers', () => {
   it('summarizes frame durations with percentiles', () => {
     expect(percentile([1, 2, 3, 4, 5], 0.95)).toBe(5)
     expect(summarizeDurations([10, 20, 30])).toMatchObject({ count: 3, average: 20, p50: 20, max: 30 })
+  })
+})
+
+describe('active render set policy', () => {
+  it('filters before the limit and includes selected objects outside the normal sample', () => {
+    const entries = normalizeCatalog(Array.from({ length: 10 }, (_, index) => record(index + 1, 'PAYLOAD', `Object ${index + 1}`))).entries
+    expect(selectRenderSet(entries, 3, null)).toHaveLength(3)
+    expect(selectRenderSet(entries, 3, 10).map((entry) => entry.noradNumericId)).toEqual([10, 1, 2, 3])
+    expect(resolveRenderLimit('5000', 100, 5000, 7000)).toBe(100)
+  })
+
+  it('uses cooldown and hysteresis to avoid AUTO flapping', () => {
+    const controller = new AutoRenderController(5000, 1000, 10000, 1000)
+    expect(controller.update({ workerMs: 300, applyMs: 1, frameP95Ms: 200 }, 1000)).toBe(2500)
+    expect(controller.update({ workerMs: 1, applyMs: 1, frameP95Ms: 10 }, 1500)).toBe(2500)
+    expect(controller.update({ workerMs: 1, applyMs: 1, frameP95Ms: 10 }, 2500)).toBe(5000)
   })
 })

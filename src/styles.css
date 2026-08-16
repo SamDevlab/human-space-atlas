@@ -131,3 +131,10 @@ p { line-height: 1.5; color: #b8c2d9; }
   border-radius: 8px;
   font: 12px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
+.catalog-counts { position: fixed; left: 18px; top: 104px; z-index: 4; padding: 8px 12px; font-size: 12px; }
+.render-modes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.small-control { display: grid; gap: 4px; margin-top: 8px; font-size: 12px; }
+.small-control input { width: 100%; box-sizing: border-box; }
+.warning-copy { color: #ffd38a; font-size: 12px; }
+.search-results { display: grid; gap: 6px; margin-top: 12px; }
+.search-results button { text-align: left; }

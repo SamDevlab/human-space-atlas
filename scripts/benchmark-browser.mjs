@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { chromium } from 'playwright'
 
 const sizes = process.argv.includes('--objects') ? [Number(process.argv[process.argv.indexOf('--objects') + 1])] : [1000, 5000, 10000, 25000, 50000]
+const renderLimit = process.argv.includes('--render-limit') ? Number(process.argv[process.argv.indexOf('--render-limit') + 1]) : null
 const port = 5180
 const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', String(port)], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] })
 let serverOutput = ''
@@ -29,7 +30,7 @@ try {
   const results = []
   for (const count of sizes) {
     const page = await browser.newPage()
-    await page.goto(`http://127.0.0.1:${port}/?debug=perf&benchmark=${count}`, { waitUntil: 'load' })
+    await page.goto(`http://127.0.0.1:${port}/?debug=perf&benchmark=${count}${renderLimit ? `&renderLimit=${renderLimit}` : ''}`, { waitUntil: 'load' })
     await page.getByText(/benchmark sintético READY/).waitFor({ timeout: 30000 })
     await page.waitForTimeout(2000)
     const data = await page.evaluate(async () => {
@@ -50,12 +51,14 @@ try {
     const workerMs = Number(await overlay.getAttribute('data-worker-ms') ?? 0)
     const applyMs = Number(await overlay.getAttribute('data-apply-ms') ?? 0)
     const transferBytes = Number(await overlay.getAttribute('data-transfer-bytes') ?? 0)
+    const loaded = Number(await overlay.getAttribute('data-loaded') ?? count)
+    const visible = Number(await overlay.getAttribute('data-visible') ?? count)
     const frame = summary(data.frames)
-    results.push({ objects: count, ...frame, workerMs, applyMs, transferBytes, longTasks: data.longTasks.length, longTaskTotal: data.longTasks.reduce((sum, value) => sum + value, 0), longTaskMax: Math.max(...data.longTasks, 0), memory: data.memory })
+    results.push({ catalogObjects: loaded, renderedObjects: visible, ...frame, workerMs, applyMs, transferBytes, longTasks: data.longTasks.length, longTaskTotal: data.longTasks.reduce((sum, value) => sum + value, 0), longTaskMax: Math.max(...data.longTasks, 0), memory: data.memory })
     await page.close()
   }
   await browser.close()
-  console.table(results.map(({ objects, average, p50, p95, p99, fps, workerMs, applyMs, longTasks, longTaskMax }) => ({ objects, avgMs: average.toFixed(2), p50: p50.toFixed(2), p95: p95.toFixed(2), p99: p99.toFixed(2), fps: fps.toFixed(1), workerMs: workerMs.toFixed(2), applyMs: applyMs.toFixed(2), longTasks, longTaskMax: longTaskMax.toFixed(1) })))
+  console.table(results.map(({ catalogObjects, renderedObjects, average, p50, p95, p99, fps, workerMs, applyMs, longTasks, longTaskMax }) => ({ catalogObjects, renderedObjects, avgMs: average.toFixed(2), p50: p50.toFixed(2), p95: p95.toFixed(2), p99: p99.toFixed(2), fps: fps.toFixed(1), workerMs: workerMs.toFixed(2), applyMs: applyMs.toFixed(2), longTasks, longTaskMax: longTaskMax.toFixed(1) })))
   await mkdir('artifacts', { recursive: true })
   await writeFile('artifacts/benchmark-results.json', JSON.stringify({ generatedAt: new Date().toISOString(), method: 'Playwright Chromium; 2s warmup + 3s rAF measurement', results }, null, 2))
 } catch (error) {

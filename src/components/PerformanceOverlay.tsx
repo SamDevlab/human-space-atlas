@@ -22,7 +22,7 @@ export function PerformanceOverlay({ loaded, visible, workerMs, applyMs, transfe
   }, [])
   const frame = summarizeDurations(frames)
   const long = summarizeDurations(longTasks)
-  return <div className="perf-overlay" data-worker-ms={workerMs} data-apply-ms={applyMs} data-transfer-bytes={transferBytes} data-pending={pending} data-frame-average={frame.average} data-frame-p95={frame.p95}>
+  return <div className="perf-overlay" data-loaded={loaded} data-visible={visible} data-worker-ms={workerMs} data-apply-ms={applyMs} data-transfer-bytes={transferBytes} data-pending={pending} data-frame-average={frame.average} data-frame-p95={frame.p95}>
     <strong>PERF DEBUG</strong>
     <span>Objects: {loaded.toLocaleString()} / visible: {visible.toLocaleString()}</span>
     <span>Frame avg: {frame.average.toFixed(1)} · p50: {frame.p50.toFixed(1)} · p95: {frame.p95.toFixed(1)} · p99: {frame.p99.toFixed(1)} ms</span>
