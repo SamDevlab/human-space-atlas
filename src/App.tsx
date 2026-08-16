@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Globe } from './components/Globe'
 import { PerformanceOverlay } from './components/PerformanceOverlay'
 import { fetchCatalog } from './lib/api'
 import { createSatrec, getOrbitState } from './lib/orbit'
 import { advanceSimulatedTime } from './lib/simulationClock'
 import { filterCatalog, normalizeCatalog } from './lib/orbitalCatalog'
+import { generateSyntheticCatalog } from './lib/syntheticCatalog'
 import type { CatalogGroup, OmmRecord } from './lib/types'
 
 const GROUPS: Array<{ value: CatalogGroup; label: string }> = [
@@ -26,12 +27,28 @@ function App() {
   const [objectQuery, setObjectQuery] = useState('')
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
+  const [performanceMetric, setPerformanceMetric] = useState({ workerMs: 0, applyMs: 0, transferBytes: 0, pending: 0 })
+  const benchmarkCount = Number(new URLSearchParams(window.location.search).get('benchmark') ?? 0)
+  const onPerformance = useCallback((metric: typeof performanceMetric) => setPerformanceMetric(metric), [])
 
   useEffect(() => {
     const controller = new AbortController()
     setError(null)
     setStatus('Carregando catálogo…')
     setSelectedId(null)
+
+    if (benchmarkCount > 0) {
+      try {
+        const synthetic = generateSyntheticCatalog(benchmarkCount)
+        setObjects(synthetic)
+        setStatus(`${synthetic.length.toLocaleString('pt-BR')} objetos · benchmark sintético READY`)
+      } catch (err) {
+        setObjects([])
+        setError(err instanceof Error ? err.message : 'Benchmark inválido')
+        setStatus('Benchmark indisponível')
+      }
+      return () => controller.abort()
+    }
 
     fetchCatalog(group, controller.signal)
       .then((payload) => {
@@ -46,7 +63,7 @@ function App() {
       })
 
     return () => controller.abort()
-  }, [group])
+  }, [group, benchmarkCount])
 
   useEffect(() => {
     const startedReal = Date.now()
@@ -91,8 +108,9 @@ function App() {
         simulatedAt={simulatedAt}
         selectedId={selectedId}
         onSelect={setSelectedId}
+        onPerformance={onPerformance}
       />
-      {new URLSearchParams(window.location.search).get('debug') === 'perf' && <PerformanceOverlay loaded={objects.length} visible={visibleObjects.length} />}
+      {new URLSearchParams(window.location.search).get('debug') === 'perf' && <PerformanceOverlay loaded={objects.length} visible={visibleObjects.length} {...performanceMetric} />}
 
       <header className="topbar glass">
         <div>

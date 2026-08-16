@@ -19,11 +19,12 @@ interface GlobeProps {
   simulatedAt: Date
   selectedId: number | null
   onSelect: (catalogId: number | null) => void
+  onPerformance?: (metric: { workerMs: number; applyMs: number; transferBytes: number; pending: number }) => void
 }
 
 const POINT_SIZE = 5
 
-export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps) {
+export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
@@ -125,6 +126,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
       const result = event.data
       if (result.type !== 'POSITIONS' || result.generation !== generation || !shouldApplyPositionResult(result.requestId, latestAppliedRequestRef.current)) return
       latestAppliedRequestRef.current = result.requestId
+      const applyStarted = performance.now()
       const pointById = new Map(objects.map((object, index) => [object.NORAD_CAT_ID, points.get(index)]))
       for (let i = 0; i < result.ids.length; i += 1) {
         const point = pointById.get(result.ids[i])
@@ -134,11 +136,12 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
         point.pixelSize = result.ids[i] === selectedId ? 10 : POINT_SIZE
         point.show = true
       }
+      onPerformance?.({ workerMs: result.elapsedMs, applyMs: performance.now() - applyStarted, transferBytes: result.values.byteLength, pending: Math.max(0, requestRef.current - result.requestId) })
     }
     worker.addEventListener('message', onMessage)
     worker.postMessage({ type: 'PROPAGATE', generation, requestId, timeMs: simulatedAt.getTime() } satisfies WorkerCommand)
     return () => worker.removeEventListener('message', onMessage)
-  }, [objects, selectedId, simulatedAt])
+  }, [objects, selectedId, simulatedAt, onPerformance])
 
   useEffect(() => {
     const viewer = viewerRef.current

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { filterCatalog, normalizeCatalog } from '../src/lib/orbitalCatalog'
 import type { OmmRecord } from '../src/lib/types'
 import { shouldApplyPositionResult } from '../src/workers/workerState'
+import { generateSyntheticCatalog } from '../src/lib/syntheticCatalog'
+import { percentile, summarizeDurations } from '../src/lib/performanceStats'
 
 const record = (id: number, type: string, name: string): OmmRecord => ({
   OBJECT_NAME: name, EPOCH: '2026-08-16T00:00:00.000Z', NORAD_CAT_ID: id,
@@ -29,5 +31,20 @@ describe('worker stale-result policy', () => {
   it('applies current results and rejects older responses', () => {
     expect(shouldApplyPositionResult(43, 42)).toBe(true)
     expect(shouldApplyPositionResult(41, 42)).toBe(false)
+  })
+})
+
+describe('benchmark helpers', () => {
+  it('generates deterministic varied synthetic catalogs', () => {
+    const first = generateSyntheticCatalog(1000)
+    const second = generateSyntheticCatalog(1000)
+    expect(first).toEqual(second)
+    expect(new Set(first.map((item) => item.NORAD_CAT_ID)).size).toBe(1000)
+    expect(new Set(first.map((item) => item.MEAN_ANOMALY)).size).toBeGreaterThan(900)
+  })
+
+  it('summarizes frame durations with percentiles', () => {
+    expect(percentile([1, 2, 3, 4, 5], 0.95)).toBe(5)
+    expect(summarizeDurations([10, 20, 30])).toMatchObject({ count: 3, average: 20, p50: 20, max: 30 })
   })
 })

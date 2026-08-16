@@ -1,13 +1,9 @@
 import { useEffect, useState } from 'react'
+import { summarizeDurations } from '../lib/performanceStats'
 
-function percentile(values: number[], p: number): number {
-  if (values.length === 0) return 0
-  const sorted = [...values].sort((a, b) => a - b)
-  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]
-}
-
-export function PerformanceOverlay({ loaded, visible }: { loaded: number; visible: number }) {
+export function PerformanceOverlay({ loaded, visible, workerMs, applyMs, transferBytes, pending }: { loaded: number; visible: number; workerMs: number; applyMs: number; transferBytes: number; pending: number }) {
   const [frames, setFrames] = useState<number[]>([])
+  const [longTasks, setLongTasks] = useState<number[]>([])
   useEffect(() => {
     let last = performance.now()
     let frame = 0
@@ -20,15 +16,20 @@ export function PerformanceOverlay({ loaded, visible }: { loaded: number; visibl
       if (frame < 300) animation = requestAnimationFrame(tick)
     }
     animation = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(animation)
+    const observer = 'PerformanceObserver' in window ? new PerformanceObserver((list) => setLongTasks((current) => [...current, ...list.getEntries().map((entry) => entry.duration)])) : null
+    observer?.observe({ type: 'longtask', buffered: true })
+    return () => { cancelAnimationFrame(animation); observer?.disconnect() }
   }, [])
-  const average = frames.length ? frames.reduce((sum, value) => sum + value, 0) / frames.length : 0
-  const fps = average ? 1000 / average : 0
-  return <div className="perf-overlay">
+  const frame = summarizeDurations(frames)
+  const long = summarizeDurations(longTasks)
+  return <div className="perf-overlay" data-worker-ms={workerMs} data-apply-ms={applyMs} data-transfer-bytes={transferBytes} data-pending={pending} data-frame-average={frame.average} data-frame-p95={frame.p95}>
     <strong>PERF DEBUG</strong>
     <span>Objects: {loaded.toLocaleString()} / visible: {visible.toLocaleString()}</span>
-    <span>Frame avg: {average.toFixed(1)} ms · p95: {percentile(frames, 0.95).toFixed(1)} ms</span>
-    <span>FPS approx: {fps.toFixed(1)} · Worker: ON</span>
+    <span>Frame avg: {frame.average.toFixed(1)} · p50: {frame.p50.toFixed(1)} · p95: {frame.p95.toFixed(1)} · p99: {frame.p99.toFixed(1)} ms</span>
+    <span>FPS: {frame.fps.toFixed(1)} · max: {frame.max.toFixed(1)} ms</span>
+    <span>Worker: {workerMs.toFixed(1)} ms · pending: {pending}</span>
+    <span>Apply: {applyMs.toFixed(1)} ms · transfer: {transferBytes.toLocaleString()} B</span>
+    <span>Long tasks: {long.count} · max: {long.max.toFixed(1)} ms</span>
     <span>Memory: {('memory' in performance) ? 'available' : 'unavailable'}</span>
   </div>
 }

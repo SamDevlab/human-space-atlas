@@ -10,9 +10,16 @@ const base = {
 }
 for (const count of [1000, 5000, 10000, 25000, 50000]) {
   const satrecs = Array.from({ length: count }, (_, index) => satellite.json2satrec({ ...base, NORAD_CAT_ID: index + 1 }))
-  const started = performance.now()
+  const samples = []
   let valid = 0
-  for (const satrec of satrecs) if (satellite.propagate(satrec, new Date('2026-08-16T12:00:00.000Z'))) valid += 1
-  const elapsedMs = performance.now() - started
-  console.log(`${count}\t${elapsedMs.toFixed(2)} ms\t${Math.round(count / (elapsedMs / 1000))} objects/sec\tvalid=${valid}`)
+  for (let iteration = 0; iteration < 7; iteration += 1) {
+    const started = performance.now()
+    valid = 0
+    for (const satrec of satrecs) if (satellite.propagate(satrec, new Date('2026-08-16T12:00:00.000Z'))) valid += 1
+    if (iteration >= 2) samples.push(performance.now() - started)
+  }
+  const sorted = [...samples].sort((a, b) => a - b)
+  const average = samples.reduce((sum, value) => sum + value, 0) / samples.length
+  const percentile = (p) => sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1)]
+  console.log(`${count}\tavg=${average.toFixed(2)} ms\tmedian=${percentile(0.5).toFixed(2)} ms\tp95=${percentile(0.95).toFixed(2)} ms\t${Math.round(count / (percentile(0.5) / 1000))} objects/sec\tvalid=${valid}`)
 }
