@@ -49,10 +49,12 @@ kbd { position: absolute; top: 11px; right: 12px; color: #718096; font-size: 10p
 .home-setting > span { color: #83d5fa; font-size: 20px; }
 .home-setting div, .map-style-list div { display: grid; gap: 3px; }
 .home-setting small, .map-style-list small { color: #7189a1; font-size: 10px; }
-.map-style-list { display: grid; gap: 4px; }
+.map-style-list { display: grid; gap: 4px; max-height: 250px; overflow-y: auto; padding-right: 3px; scrollbar-width: thin; scrollbar-color: #49637d transparent; }
 .map-preview { width: 38px; height: 30px; flex: 0 0 auto; border-radius: 6px; border: 1px solid rgba(255,255,255,.12); }
 .satellite-preview { background: radial-gradient(circle at 65% 35%, #c7dfb5 0 8%, transparent 9%), linear-gradient(135deg, #225d83, #87a87c 47%, #244c68); }
 .map-preview-osm { background: linear-gradient(135deg, #e4e7d5 0 42%, #b7d5e4 43% 58%, #e7dfb7 59%); }
+.map-preview-generic { background: linear-gradient(135deg, #1b3148, #7896a8 48%, #263b4c); background-size: cover; }
+.map-check { margin-left: auto; color: #8fe0ff; font-size: 15px; }
 .popover-heading, .inspector-heading { display: flex; align-items: center; justify-content: space-between; }
 .density-list { display: grid; gap: 4px; }
 .density-list button { display: flex; justify-content: space-between; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; color: #b7c6d8; background: transparent; text-align: left; }

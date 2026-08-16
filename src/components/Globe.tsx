@@ -5,11 +5,11 @@ import {
   Color,
   Ion,
   PointPrimitiveCollection,
-  OpenStreetMapImageryProvider,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   Viewer,
 } from 'cesium'
+import { discoverMapStyles } from '../lib/mapStyles'
 import type { OmmRecord } from '../lib/types'
 import { createSatrec, sampleOrbit, toCesiumHeightMeters } from '../lib/orbit'
 import type { WorkerCommand, WorkerResult } from '../workers/orbitProtocol'
@@ -22,12 +22,13 @@ interface GlobeProps {
   onSelect: (catalogId: number | null) => void
   onPerformance?: (metric: { workerMs: number; applyMs: number; transferBytes: number; pending: number }) => void
   homeRequest?: number
-  mapStyle?: 'default' | 'osm'
+  mapStyle?: string
+  onMapStyleError?: () => void
 }
 
 const POINT_SIZE = 5
 
-export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'default' }: GlobeProps) {
+export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', onMapStyleError }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
@@ -107,17 +108,23 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     if (!viewer) return
     const current = viewer.imageryLayers.get(0)
     if (!current) return
-    if (mapStyle === 'default') {
+    const definition = discoverMapStyles().find((style) => style.id === mapStyle) ?? discoverMapStyles()[0]
+    if (definition.isDefault) {
       if (defaultImageryRef.current && current.imageryProvider !== defaultImageryRef.current) {
         viewer.imageryLayers.removeAll(false)
         viewer.imageryLayers.addImageryProvider(defaultImageryRef.current as Parameters<typeof viewer.imageryLayers.addImageryProvider>[0])
       }
       return
     }
-    if (current.imageryProvider instanceof OpenStreetMapImageryProvider) return
-    viewer.imageryLayers.removeAll(false)
-    viewer.imageryLayers.addImageryProvider(new OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }))
-  }, [mapStyle])
+    let cancelled = false
+    Promise.resolve(definition.create?.()).then((provider) => {
+      if (cancelled || !provider) return
+      viewer.imageryLayers.removeAll(false)
+      if (Array.isArray(provider)) provider.forEach((item) => viewer.imageryLayers.addImageryProvider(item))
+      else viewer.imageryLayers.addImageryProvider(provider)
+    }).catch(() => { if (!cancelled) onMapStyleError?.() })
+    return () => { cancelled = true }
+  }, [mapStyle, onMapStyleError])
 
   useEffect(() => {
     const worker = workerRef.current
