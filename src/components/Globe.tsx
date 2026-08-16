@@ -102,6 +102,17 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     defaultImageryRef.current = viewer.imageryLayers.get(0)?.imageryProvider ?? null
 
     viewer.scene.globe.enableLighting = true
+    viewer.scene.globe.showGroundAtmosphere = true
+    viewer.scene.globe.dynamicAtmosphereLighting = true
+    viewer.scene.globe.dynamicAtmosphereLightingFromSun = true
+    viewer.scene.globe.atmosphereBrightnessShift = -0.08
+    viewer.scene.globe.atmosphereSaturationShift = 0.08
+    const skyAtmosphere = viewer.scene.skyAtmosphere
+    if (skyAtmosphere) {
+      skyAtmosphere.show = true
+      skyAtmosphere.brightnessShift = -0.06
+      skyAtmosphere.saturationShift = 0.08
+    }
     viewer.scene.backgroundColor = Color.fromCssColorString('#02040b')
 
     const points = viewer.scene.primitives.add(new PointPrimitiveCollection())
@@ -206,20 +217,21 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer) return
+    let cancelled = false
     if (!viewer.isDestroyed() && cloudLayerRef.current) {
       viewer.imageryLayers.remove(cloudLayerRef.current, false)
       cloudLayerRef.current = null
     }
     if (!cloudsEnabled) return
-    try {
-      const layer = viewer.imageryLayers.addImageryProvider(createNasaCloudProvider())
+    createNasaCloudProvider().then((provider) => {
+      if (cancelled || viewer.isDestroyed()) return
+      const layer = viewer.imageryLayers.addImageryProvider(provider)
       layer.alpha = cloudOpacity
       cloudLayerRef.current = layer
       viewer.imageryLayers.raiseToTop(layer)
-    } catch {
-      onCloudError?.()
-    }
+    }).catch(() => { if (!cancelled) onCloudError?.() })
     return () => {
+      cancelled = true
       if (!viewer.isDestroyed() && cloudLayerRef.current) {
         viewer.imageryLayers.remove(cloudLayerRef.current, false)
         cloudLayerRef.current = null

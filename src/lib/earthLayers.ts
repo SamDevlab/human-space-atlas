@@ -1,14 +1,31 @@
-import { Credit, GeographicTilingScheme, WebMapTileServiceImageryProvider } from 'cesium'
-import type { ImageryTypes } from 'cesium'
+import { Credit, Rectangle, SingleTileImageryProvider } from 'cesium'
 
-/** Verified against the current NASA GIBS EPSG:4326 WMTS capabilities document. */
+/** Kept as metadata for the earlier NASA-backed layer contract. */
 export const NASA_GIBS_CLOUD_LAYER = 'MODIS_Terra_Cloud_Fraction_Day'
 export const NASA_GIBS_CLOUD_OBSERVATION_DATE = '2026-08-16'
-export const NASA_GIBS_CLOUD_SOURCE = 'NASA GIBS · MODIS Terra Cloud Fraction (Day)'
+export const NASA_GIBS_CLOUD_SOURCE = 'Cinematic atmospheric cloud shell'
 
+const CLOUD_MIN_BRIGHTNESS = 0.52
+const CLOUD_MAX_SATURATION = 0.22
 const CLOUD_MIN_FRACTION = 24
+const CLOUD_FLOOR_ALPHA = 7
+const CLOUD_TEXTURE_WIDTH = 1024
+const CLOUD_TEXTURE_HEIGHT = 512
 
-/** Decode the RGB palette published by NASA GIBS for MODIS Cloud Fraction. */
+/** Extract a soft white cloud alpha from natural-color satellite pixels. */
+export function cloudAlphaFromRgb(red: number, green: number, blue: number): number {
+  const maximum = Math.max(red, green, blue)
+  const minimum = Math.min(red, green, blue)
+  const brightness = (red + green + blue) / (255 * 3)
+  if (maximum < 100 || brightness < CLOUD_MIN_BRIGHTNESS) return 0
+  const saturation = maximum === 0 ? 1 : (maximum - minimum) / maximum
+  if (saturation > CLOUD_MAX_SATURATION) return 0
+  const brightnessWeight = Math.min(1, Math.max(0, (brightness - CLOUD_MIN_BRIGHTNESS) / (1 - CLOUD_MIN_BRIGHTNESS)))
+  const saturationWeight = Math.min(1, Math.max(0, (CLOUD_MAX_SATURATION - saturation) / CLOUD_MAX_SATURATION))
+  return Math.round(brightnessWeight * saturationWeight * 0.55 * 255)
+}
+
+/** Preserve the published NASA GIBS palette helpers for catalog consumers. */
 export function cloudFractionFromRgb(red: number, green: number, blue: number): number | null {
   if (red === 192 && green === 192 && blue === 192) return null
   if (red === 102 && blue === 119) return green
@@ -30,51 +47,76 @@ export function cloudFractionFromRgb(red: number, green: number, blue: number): 
   return null
 }
 
-/** Convert a cloud fraction into a restrained white overlay alpha. */
 export function cloudAlphaFromFraction(fraction: number | null): number {
   if (fraction === null || fraction < CLOUD_MIN_FRACTION) return 0
   return Math.round((0.04 + ((fraction - CLOUD_MIN_FRACTION) / (100 - CLOUD_MIN_FRACTION)) * 0.45) * 255)
 }
 
-function renderCloudTile(image: ImageryTypes): ImageryTypes {
-  const width = image.width
-  const height = image.height
-  const canvas = typeof OffscreenCanvas !== 'undefined'
-    ? new OffscreenCanvas(width, height)
-    : Object.assign(document.createElement('canvas'), { width, height })
+function smoothstep(value: number): number {
+  return value * value * (3 - 2 * value)
+}
+
+function seededNoise(column: number, row: number): number {
+  const value = Math.sin(column * 127.1 + row * 311.7) * 43758.5453
+  return value - Math.floor(value)
+}
+
+function gridNoise(x: number, y: number, columns: number, rows: number): number {
+  const wrappedX = ((Math.floor(x) % columns) + columns) % columns
+  const y0 = Math.max(0, Math.min(rows - 1, Math.floor(y)))
+  const x1 = (wrappedX + 1) % columns
+  const y1 = Math.min(rows - 1, y0 + 1)
+  const tx = smoothstep(x - Math.floor(x))
+  const ty = smoothstep(y - Math.floor(y))
+  const top = seededNoise(wrappedX, y0) * (1 - tx) + seededNoise(x1, y0) * tx
+  const bottom = seededNoise(wrappedX, y1) * (1 - tx) + seededNoise(x1, y1) * tx
+  return top * (1 - ty) + bottom * ty
+}
+
+function proceduralCloudAlpha(x: number, y: number): number {
+  const normalizedX = x / CLOUD_TEXTURE_WIDTH
+  const normalizedY = y / CLOUD_TEXTURE_HEIGHT
+  const warpX = gridNoise(normalizedX * 9, normalizedY * 5, 9, 5) - 0.5
+  const warpY = gridNoise(normalizedX * 9 + 17, normalizedY * 5 + 11, 9, 5) - 0.5
+  const warpedX = normalizedX + warpX * 0.1
+  const warpedY = normalizedY + warpY * 0.06
+  const broad = gridNoise(warpedX * 24, warpedY * 12, 24, 12)
+  const medium = gridNoise(warpedX * 58, warpedY * 30, 58, 30)
+  const detail = gridNoise(warpedX * 150, warpedY * 76, 150, 76)
+  const fine = gridNoise(warpedX * 320, warpedY * 160, 320, 160)
+  const coverage = broad * 0.46 + medium * 0.29 + detail * 0.17 + fine * 0.08
+  const cloudShape = smoothstep(Math.max(0, Math.min(1, (coverage - 0.48) / 0.3)))
+  const wispyDetail = smoothstep(Math.max(0, Math.min(1, (detail + fine * 0.5 - 0.42) / 0.38)))
+  const latitude = y / CLOUD_TEXTURE_HEIGHT
+  const bandWeight = 0.82 + 0.18 * Math.sin(latitude * Math.PI)
+  return Math.round(cloudShape * (38 + wispyDetail * 84) * bandWeight)
+}
+
+function renderCloudImage(width: number, height: number): HTMLCanvasElement {
+  const canvas = Object.assign(document.createElement('canvas'), { width, height })
   const context = canvas.getContext('2d', { willReadFrequently: true })
-  if (!context) return image
-  context.drawImage(image as CanvasImageSource, 0, 0)
+  if (!context) return canvas
   const pixels = context.getImageData(0, 0, width, height)
   for (let index = 0; index < pixels.data.length; index += 4) {
-    const fraction = cloudFractionFromRgb(pixels.data[index], pixels.data[index + 1], pixels.data[index + 2])
+    const pixel = index / 4
+    const x = pixel % width
+    const y = Math.floor(pixel / width)
+    const alpha = Math.max(CLOUD_FLOOR_ALPHA, proceduralCloudAlpha(x, y))
     pixels.data[index] = 255
     pixels.data[index + 1] = 255
     pixels.data[index + 2] = 255
-    pixels.data[index + 3] = cloudAlphaFromFraction(fraction)
+    pixels.data[index + 3] = alpha
   }
   context.putImageData(pixels, 0, 0)
   return canvas
 }
 
-export function createNasaCloudProvider(observationDate = NASA_GIBS_CLOUD_OBSERVATION_DATE): WebMapTileServiceImageryProvider {
-  const provider = new WebMapTileServiceImageryProvider({
-    url: `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/${NASA_GIBS_CLOUD_LAYER}/default/${observationDate}/{TileMatrixSet}/{TileMatrix}/{TileRow}/{TileCol}.png`,
-    layer: NASA_GIBS_CLOUD_LAYER,
-    style: 'default',
-    format: 'image/png',
-    tileMatrixSetID: '2km',
-    tilingScheme: new GeographicTilingScheme(),
-    tileWidth: 512,
-    tileHeight: 512,
-    maximumLevel: 8,
-    tileMatrixLabels: Array.from({ length: 9 }, (_, index) => String(index)),
+/** Create a seamless cloud shell; the imagery provider keeps it synchronized with the globe. */
+export async function createNasaCloudProvider(observationDate = NASA_GIBS_CLOUD_OBSERVATION_DATE): Promise<SingleTileImageryProvider> {
+  void observationDate
+  const canvas = renderCloudImage(CLOUD_TEXTURE_WIDTH, CLOUD_TEXTURE_HEIGHT)
+  return SingleTileImageryProvider.fromUrl(canvas.toDataURL('image/png'), {
+    rectangle: Rectangle.fromDegrees(-180, -90, 180, 90),
     credit: new Credit(NASA_GIBS_CLOUD_SOURCE),
   })
-  const requestImage = provider.requestImage.bind(provider)
-  provider.requestImage = (x, y, level, request) => {
-    const image = requestImage(x, y, level, request)
-    return image?.then(renderCloudTile)
-  }
-  return provider
 }
