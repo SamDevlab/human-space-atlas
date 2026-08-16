@@ -7,7 +7,8 @@ import { percentile, summarizeDurations } from '../src/lib/performanceStats'
 import { AutoRenderController, resolveRenderLimit, selectRenderSet } from '../src/lib/renderSet'
 import { LatestOnlyQueue } from '../src/workers/latestOnlyQueue'
 import { Cartesian3, Cartographic, Quaternion } from 'cesium'
-import { createShipState, integrateShip, MAX_ANGULAR_SPEED_RADIANS_PER_SECOND, MAX_SPEED_METERS_PER_SECOND, MIN_ALTITUDE_METERS } from '../src/exploration/flightModel'
+import { createShipState, getShipBasis, integrateShip, MAX_ANGULAR_SPEED_RADIANS_PER_SECOND, MAX_SPEED_METERS_PER_SECOND, MIN_ALTITUDE_METERS } from '../src/exploration/flightModel'
+import { combineAngularInput, resolveKeyboardAngularInput, resolveMouseAngularInput } from '../src/exploration/explorationInput'
 import { applyCameraOrbit, applyCameraZoom, clampCameraPitch, DEFAULT_CAMERA_DISTANCE_METERS, MAX_CAMERA_DISTANCE_METERS, MIN_CAMERA_DISTANCE_METERS } from '../src/exploration/ShipCameraRig'
 
 const record = (id: number, type: string, name: string): OmmRecord => ({
@@ -137,6 +138,44 @@ describe('exploration flight model', () => {
     expect(turning.angularVelocity.y).toBeLessThanOrEqual(MAX_ANGULAR_SPEED_RADIANS_PER_SECOND)
     expect(Math.abs(Quaternion.magnitude(turning.orientation) - 1)).toBeLessThan(0.0001)
     expect(Math.abs(damping.angularVelocity.y)).toBeLessThan(Math.abs(turning.angularVelocity.y))
+  })
+
+  it('keeps thrust aligned with the rotated ship heading', () => {
+    const yaw90 = Quaternion.fromAxisAngle(Cartesian3.UNIT_Z, Math.PI / 2, new Quaternion())
+    const state = { ...createShipState(Cartesian3.fromDegrees(0, 0, 800_000), yaw90), throttle: 1 }
+    const next = integrateShip(state, neutralInput, 0.1)
+    const basis = getShipBasis(state.orientation)
+    expect(Cartesian3.dot(next.velocity, basis.forward)).toBeGreaterThan(1)
+    expect(Math.abs(Cartesian3.dot(next.velocity, Cartesian3.UNIT_X))).toBeLessThan(1)
+  })
+})
+
+describe('exploration ship frame and input fallbacks', () => {
+  it('uses +X forward, +Y right and +Z up in identity orientation', () => {
+    const basis = getShipBasis(Quaternion.IDENTITY)
+    expect(Cartesian3.distance(basis.forward, Cartesian3.UNIT_X)).toBeLessThan(0.0001)
+    expect(Cartesian3.distance(basis.right, Cartesian3.UNIT_Y)).toBeLessThan(0.0001)
+    expect(Cartesian3.distance(basis.up, Cartesian3.UNIT_Z)).toBeLessThan(0.0001)
+  })
+
+  it('rotates the expected basis axes for yaw, pitch and roll', () => {
+    const yaw = getShipBasis(Quaternion.fromAxisAngle(Cartesian3.UNIT_Z, Math.PI / 2, new Quaternion()))
+    const pitch = getShipBasis(Quaternion.fromAxisAngle(Cartesian3.UNIT_Y, Math.PI / 2, new Quaternion()))
+    const roll = getShipBasis(Quaternion.fromAxisAngle(Cartesian3.UNIT_X, Math.PI / 2, new Quaternion()))
+    expect(Math.abs(Cartesian3.dot(yaw.forward, Cartesian3.UNIT_Y))).toBeGreaterThan(0.999)
+    expect(Math.abs(pitch.forward.z)).toBeGreaterThan(0.999)
+    expect(Math.abs(Cartesian3.dot(roll.forward, Cartesian3.UNIT_X))).toBeGreaterThan(0.999)
+    expect(Math.abs(roll.right.z)).toBeGreaterThan(0.999)
+    expect(Math.abs(roll.up.y)).toBeGreaterThan(0.999)
+  })
+
+  it('provides keyboard and mouse angular fallback input', () => {
+    const keyboard = resolveKeyboardAngularInput(new Set(['ArrowLeft', 'ArrowUp', 'KeyQ']))
+    expect(keyboard).toEqual({ yawRate: -1, pitchRate: 1, rollInput: -1 })
+    const mouse = resolveMouseAngularInput(20, -10, 1 / 60)
+    expect(mouse.yawRate).toBeGreaterThan(0)
+    expect(mouse.pitchRate).toBeGreaterThan(0)
+    expect(combineAngularInput(keyboard, mouse).yawRate).toBeLessThanOrEqual(1)
   })
 })
 

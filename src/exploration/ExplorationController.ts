@@ -7,9 +7,10 @@ import {
   Quaternion,
   Viewer,
 } from 'cesium'
-import { createShipState, formatDistanceKm, integrateShip, LOW_ALTITUDE_WARNING_METERS } from './flightModel'
+import { createShipState, formatDistanceKm, getShipBasis, integrateShip, LOW_ALTITUDE_WARNING_METERS } from './flightModel'
 import { ShipCameraRig } from './ShipCameraRig'
 import { ShipVisual } from './ShipVisual'
+import { combineAngularInput, resolveKeyboardAngularInput, resolveMouseAngularInput } from './explorationInput'
 import type { ExplorationCameraMode, ExplorationHudSnapshot, FlightInput, ShipState, TargetIndicatorSnapshot } from './types'
 
 interface ControllerOptions {
@@ -38,16 +39,21 @@ export class ExplorationController {
   private lastHud = 0
   private readonly keys = new Set<string>()
   private mouseCaptured = false
+  private steeringCaptured = false
   private cameraOrbiting = false
   private mouseX = 0
   private mouseY = 0
+  private lastPointerX = 0
+  private lastPointerY = 0
+  private lastMouseDx = 0
+  private lastMouseDy = 0
   private steeringSensitivity = 1
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     if (!this.active) return
     if (event.code === 'Escape') {
       event.preventDefault()
-      if (this.mouseCaptured || document.pointerLockElement === this.canvas) this.releaseMouse()
+      if (this.mouseCaptured || this.steeringCaptured || document.pointerLockElement === this.canvas) this.releaseMouse()
       else this.options.onExit()
       return
     }
@@ -63,7 +69,7 @@ export class ExplorationController {
       this.options.onOpenNavigation()
       return
     }
-    if (['Space', 'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyX'].includes(event.code)) {
+    if (['Space', 'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyX', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.code)) {
       event.preventDefault()
       this.options.onControlsActivity()
     }
@@ -81,9 +87,12 @@ export class ExplorationController {
       this.options.onControlsActivity()
       return
     }
-    if (event.button === 0) {
-      this.mouseCaptured = true
-      this.canvas.requestPointerLock?.()
+    if (event.button === 0 || event.button === 2) {
+      this.steeringCaptured = true
+      this.lastPointerX = event.clientX
+      this.lastPointerY = event.clientY
+      this.mouseCaptured = event.button === 0
+      if (event.button === 0) this.canvas.requestPointerLock?.()
       this.options.onControlsActivity()
     }
   }
@@ -93,7 +102,10 @@ export class ExplorationController {
       this.cameraOrbiting = false
       this.cameraRig.endOrbit()
     }
-    if (event.button === 0 && document.pointerLockElement !== this.canvas) this.mouseCaptured = false
+    if ((event.button === 0 || event.button === 2) && document.pointerLockElement !== this.canvas) {
+      this.mouseCaptured = false
+      this.steeringCaptured = false
+    }
   }
 
   private readonly onMouseMove = (event: MouseEvent) => {
@@ -102,9 +114,15 @@ export class ExplorationController {
       this.cameraRig.orbit(event.movementX, event.movementY)
       return
     }
-    if (!this.mouseCaptured && document.pointerLockElement !== this.canvas) return
-    this.mouseX += event.movementX
-    this.mouseY += event.movementY
+    if (!this.steeringCaptured && document.pointerLockElement !== this.canvas) return
+    const fallbackDx = event.clientX - this.lastPointerX
+    const fallbackDy = event.clientY - this.lastPointerY
+    const dx = event.movementX || fallbackDx
+    const dy = event.movementY || fallbackDy
+    this.mouseX += dx
+    this.mouseY += dy
+    this.lastPointerX = event.clientX
+    this.lastPointerY = event.clientY
   }
 
   private readonly onWheel = (event: WheelEvent) => {
@@ -115,7 +133,7 @@ export class ExplorationController {
   }
 
   private readonly onPointerLockChange = () => {
-    if (document.pointerLockElement !== this.canvas) this.mouseCaptured = false
+    if (document.pointerLockElement !== this.canvas && !this.steeringCaptured) this.mouseCaptured = false
   }
 
   private readonly onContextMenu = (event: MouseEvent) => {
@@ -197,17 +215,20 @@ export class ExplorationController {
   }
 
   private readInput(dt: number): FlightInput {
-    const yawRate = Math.max(-1, Math.min(1, this.mouseX * 0.003 * this.steeringSensitivity / Math.max(dt, 0.016)))
-    const pitchRate = Math.max(-1, Math.min(1, -this.mouseY * 0.003 * this.steeringSensitivity / Math.max(dt, 0.016)))
+    const mouseDx = this.mouseX
+    const mouseDy = this.mouseY
+    const angularInput = combineAngularInput(resolveKeyboardAngularInput(this.keys), resolveMouseAngularInput(mouseDx, mouseDy, dt, this.steeringSensitivity))
+    this.lastMouseDx = mouseDx
+    this.lastMouseDy = mouseDy
     this.mouseX = 0
     this.mouseY = 0
     return {
       throttleDelta: (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0),
       strafe: (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0),
       vertical: (this.keys.has('Space') ? 1 : 0) - (this.keys.has('ControlLeft') || this.keys.has('ControlRight') ? 1 : 0),
-      yawRate,
-      pitchRate,
-      rollInput: (this.keys.has('KeyE') ? 1 : 0) - (this.keys.has('KeyQ') ? 1 : 0),
+      yawRate: angularInput.yawRate,
+      pitchRate: angularInput.pitchRate,
+      rollInput: angularInput.rollInput,
       boost: this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'),
       brake: this.keys.has('KeyX'),
     }
@@ -218,6 +239,7 @@ export class ExplorationController {
     this.lastHud = now
     const cartographic = Cartographic.fromCartesian(this.state.position)
     const targetDistanceKm = this.targetPosition ? Cartesian3.distance(this.state.position, this.targetPosition) / 1000 : null
+    const basis = getShipBasis(this.state.orientation)
     this.options.onHudUpdate({
       altitudeKm: cartographic?.height ? Math.max(0, cartographic.height / 1000) : 0,
       speedKmS: Cartesian3.magnitude(this.state.velocity) / 1000,
@@ -231,6 +253,18 @@ export class ExplorationController {
       targetName: this.targetName,
       targetDistanceKm,
       targetIndicator: this.targetPosition ? this.getTargetIndicator(this.targetPosition) : null,
+      debugFlight: {
+        mouseDx: this.lastMouseDx,
+        mouseDy: this.lastMouseDy,
+        yawRate: this.state.angularVelocity.y,
+        pitchRate: this.state.angularVelocity.x,
+        rollRate: this.state.angularVelocity.z,
+        throttle: this.state.throttle,
+        velocity: this.state.velocity.clone(),
+        forward: basis.forward,
+        orientation: this.state.orientation.clone(),
+        pointerLock: document.pointerLockElement === this.canvas,
+      },
     })
   }
 
@@ -296,12 +330,14 @@ export class ExplorationController {
     this.canvas.removeEventListener('wheel', this.onWheel)
     this.canvas.removeEventListener('contextmenu', this.onContextMenu)
     this.keys.clear()
+    this.steeringCaptured = false
     this.cameraOrbiting = false
     this.cameraRig.endOrbit()
   }
 
   private releaseMouse(): void {
     this.mouseCaptured = false
+    this.steeringCaptured = false
     if (document.pointerLockElement === this.canvas) document.exitPointerLock?.()
   }
 }

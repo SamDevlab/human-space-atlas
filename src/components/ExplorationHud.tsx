@@ -3,6 +3,7 @@ import type { ExplorationHudSnapshot } from '../exploration/types'
 
 interface ExplorationHudProps {
   snapshot: ExplorationHudSnapshot
+  debugFlight: boolean
   onExit: () => void
   onOpenNav: () => void
   onOpenSettings: () => void
@@ -21,7 +22,11 @@ function throttleLabel(throttle: number): string {
   return `${throttle < 0 ? 'REV ' : '+'}${percent}%`
 }
 
-export function ExplorationHud({ snapshot, onExit, onOpenNav, onOpenSettings, controlsHelpVisible, onDismissHelp }: ExplorationHudProps) {
+function vectorLabel(vector: { x: number; y: number; z: number }): string {
+  return `${vector.x.toFixed(2)}  ${vector.y.toFixed(2)}  ${vector.z.toFixed(2)}`
+}
+
+export function ExplorationHud({ snapshot, debugFlight, onExit, onOpenNav, onOpenSettings, controlsHelpVisible, onDismissHelp }: ExplorationHudProps) {
   const marker = snapshot.targetIndicator
   const markerStyle = marker ? { left: `${marker.x}px`, top: `${marker.y}px` } : undefined
   const arrowStyle = marker?.edge ? { transform: `rotate(${marker.angle}rad)` } : undefined
@@ -52,6 +57,16 @@ export function ExplorationHud({ snapshot, onExit, onOpenNav, onOpenSettings, co
       <div className="explore-help-heading"><strong>HSA EXPLORER</strong><span>THIRD-PERSON FLIGHT</span></div>
       <div className="explore-help-grid"><span><b>W / S</b> throttle</span><span><b>Mouse</b> steer</span><span><b>MMB</b> orbit camera</span><span><b>Wheel</b> zoom</span><span><b>A / D</b> strafe</span><span><b>Space / Ctrl</b> vertical</span><span><b>Q / E</b> roll</span><span><b>Shift</b> boost</span><span><b>X</b> brake</span><span><b>R</b> recenter</span></div>
       <button onClick={onDismissHelp}>GOT IT</button>
+    </div>}
+    {debugFlight && <div className="flight-debug">
+      <strong>FLIGHT DEBUG</strong>
+      <span>Mouse DX / DY <b>{snapshot.debugFlight.mouseDx.toFixed(1)} / {snapshot.debugFlight.mouseDy.toFixed(1)}</b></span>
+      <span>Yaw / Pitch / Roll <b>{snapshot.debugFlight.yawRate.toFixed(2)} / {snapshot.debugFlight.pitchRate.toFixed(2)} / {snapshot.debugFlight.rollRate.toFixed(2)}</b></span>
+      <span>Throttle <b>{snapshot.debugFlight.throttle.toFixed(3)}</b></span>
+      <span>Velocity <b>{vectorLabel(snapshot.debugFlight.velocity)}</b></span>
+      <span>Forward <b>{vectorLabel(snapshot.debugFlight.forward)}</b></span>
+      <span>Quaternion <b>{snapshot.debugFlight.orientation.x.toFixed(3)} {snapshot.debugFlight.orientation.y.toFixed(3)} {snapshot.debugFlight.orientation.z.toFixed(3)} {snapshot.debugFlight.orientation.w.toFixed(3)}</b></span>
+      <span>Pointer Lock <b>{snapshot.debugFlight.pointerLock ? 'ON' : 'OFF'}</b></span>
     </div>}
   </div>
 }

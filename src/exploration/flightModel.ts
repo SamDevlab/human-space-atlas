@@ -1,6 +1,12 @@
 import { Cartesian3, Cartographic, Ellipsoid, Matrix3, Quaternion } from 'cesium'
 import type { FlightInput, ShipState } from './types'
 
+export interface ShipBasis {
+  forward: Cartesian3
+  right: Cartesian3
+  up: Cartesian3
+}
+
 export const MIN_ALTITUDE_METERS = 120_000
 export const LOW_ALTITUDE_WARNING_METERS = 200_000
 export const MAX_SPEED_METERS_PER_SECOND = 50_000
@@ -44,6 +50,16 @@ function clampToEarthBoundary(position: Cartesian3, velocity: Cartesian3): { pos
   return { position: safePosition, velocity: safeVelocity }
 }
 
+/** The Explorer model frame is explicit: +X forward, +Y right, +Z up. */
+export function getShipBasis(orientation: Quaternion): ShipBasis {
+  const rotation = Matrix3.fromQuaternion(orientation, new Matrix3())
+  return {
+    forward: Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_X, new Cartesian3()),
+    right: Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_Y, new Cartesian3()),
+    up: Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_Z, new Cartesian3()),
+  }
+}
+
 export function createShipState(position: Cartesian3, orientation = Quaternion.IDENTITY): ShipState {
   return {
     position: position.clone(),
@@ -60,10 +76,10 @@ export function integrateShip(state: ShipState, input: FlightInput, deltaSeconds
   const dt = clamp(deltaSeconds, 0, 0.1)
   if (dt === 0) return state
 
-  const rotation = Matrix3.fromQuaternion(state.orientation, new Matrix3())
-  const forward = Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_X, new Cartesian3())
-  const right = Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_Y, new Cartesian3())
-  const up = Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_Z, new Cartesian3())
+  const basis = getShipBasis(state.orientation)
+  const forward = basis.forward
+  const right = basis.right
+  const up = basis.up
 
   let throttle = clamp(state.throttle + clamp(input.throttleDelta, -1, 1) * THROTTLE_RATE_PER_SECOND * dt, -1, 1)
   if (input.brake) throttle = approach(throttle, 0, 1.8 * dt)
@@ -83,10 +99,14 @@ export function integrateShip(state: ShipState, input: FlightInput, deltaSeconds
   orientation = rotateAroundAxis(orientation, right, angularVelocity.x * dt)
   orientation = rotateAroundAxis(orientation, forward, angularVelocity.z * dt)
 
+  // Thrust is evaluated from the newly rotated frame so the next input sample
+  // cannot briefly accelerate along the previous heading.
+  const updatedBasis = getShipBasis(orientation)
+
   const thrust = new Cartesian3()
-  Cartesian3.add(thrust, Cartesian3.multiplyByScalar(forward, throttle * ACCELERATION, new Cartesian3()), thrust)
-  Cartesian3.add(thrust, Cartesian3.multiplyByScalar(right, input.strafe * LATERAL_ACCELERATION, new Cartesian3()), thrust)
-  Cartesian3.add(thrust, Cartesian3.multiplyByScalar(up, input.vertical * LATERAL_ACCELERATION, new Cartesian3()), thrust)
+  Cartesian3.add(thrust, Cartesian3.multiplyByScalar(updatedBasis.forward, throttle * ACCELERATION, new Cartesian3()), thrust)
+  Cartesian3.add(thrust, Cartesian3.multiplyByScalar(updatedBasis.right, input.strafe * LATERAL_ACCELERATION, new Cartesian3()), thrust)
+  Cartesian3.add(thrust, Cartesian3.multiplyByScalar(updatedBasis.up, input.vertical * LATERAL_ACCELERATION, new Cartesian3()), thrust)
   if (input.boost) Cartesian3.multiplyByScalar(thrust, BOOST_MULTIPLIER, thrust)
 
   let velocity = Cartesian3.add(state.velocity, Cartesian3.multiplyByScalar(thrust, dt, new Cartesian3()), new Cartesian3())

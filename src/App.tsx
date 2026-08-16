@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Cartesian3 } from 'cesium'
+import { Cartesian3, Quaternion } from 'cesium'
 import { Globe } from './components/Globe'
 import { ExplorationHud } from './components/ExplorationHud'
 import { ExploreNav } from './components/ExploreNav'
@@ -27,6 +27,7 @@ const SPEEDS = [0, 1, 10, 100]
 function App() {
   const benchmarkCount = Number(new URLSearchParams(window.location.search).get('benchmark') ?? 0)
   const benchmarkRenderLimit = Number(new URLSearchParams(window.location.search).get('renderLimit') ?? 0)
+  const debugFlight = new URLSearchParams(window.location.search).get('debug') === 'flight'
   const [group, setGroup] = useState<CatalogGroup>('stations')
   const [objects, setObjects] = useState<OmmRecord[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -48,7 +49,7 @@ function App() {
   const [exploreSteeringSensitivity, setExploreSteeringSensitivity] = useState(() => Number(localStorage.getItem('human-space-atlas.explore-steering-sensitivity') ?? 1))
   const [exploreCameraSensitivity, setExploreCameraSensitivity] = useState(() => Number(localStorage.getItem('human-space-atlas.explore-camera-sensitivity') ?? 1))
   const [exploreControlsVisible, setExploreControlsVisible] = useState(() => localStorage.getItem('human-space-atlas.explore-controls-seen') !== '1')
-  const [explorationHud, setExplorationHud] = useState<ExplorationHudSnapshot>({ altitudeKm: 0, speedKmS: 0, throttle: 0, cameraMode: 'THIRD_PERSON', cameraDistanceMeters: 7500, cameraOrbiting: false, flightAssist: true, boostActive: false, lowAltitude: false, targetName: null, targetDistanceKm: null, targetIndicator: null })
+  const [explorationHud, setExplorationHud] = useState<ExplorationHudSnapshot>({ altitudeKm: 0, speedKmS: 0, throttle: 0, cameraMode: 'THIRD_PERSON', cameraDistanceMeters: 7500, cameraOrbiting: false, flightAssist: true, boostActive: false, lowAltitude: false, targetName: null, targetDistanceKm: null, targetIndicator: null, debugFlight: { mouseDx: 0, mouseDy: 0, yawRate: 0, pitchRate: 0, rollRate: 0, throttle: 0, velocity: Cartesian3.ZERO, forward: Cartesian3.UNIT_X, orientation: Quaternion.IDENTITY, pointerLock: false } })
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
@@ -294,7 +295,7 @@ function App() {
       </aside>
 
       <footer className="source-note">CelesTrak · OMM / JSON · SGP4 · CesiumJS</footer>
-      {explorationActive && <ExplorationHud snapshot={explorationHud} onExit={onExitExplore} onOpenNav={onOpenExploreNav} onOpenSettings={onOpenExploreSettings} controlsHelpVisible={exploreControlsVisible} onDismissHelp={dismissExploreControls} />}
+      {explorationActive && <ExplorationHud snapshot={explorationHud} debugFlight={debugFlight} onExit={onExitExplore} onOpenNav={onOpenExploreNav} onOpenSettings={onOpenExploreSettings} controlsHelpVisible={exploreControlsVisible} onDismissHelp={dismissExploreControls} />}
       {explorationActive && exploreNavOpen && <ExploreNav query={exploreNavQuery} entries={exploreNavEntries} onQueryChange={setExploreNavQuery} onSelect={selectExploreTarget} onClose={() => setExploreNavOpen(false)} />}
       {explorationActive && exploreSettingsOpen && <ExploreSettings steeringSensitivity={exploreSteeringSensitivity} cameraSensitivity={exploreCameraSensitivity} onSteeringChange={setExploreSteeringSensitivity} onCameraChange={setExploreCameraSensitivity} onClose={() => setExploreSettingsOpen(false)} />}
     </main>

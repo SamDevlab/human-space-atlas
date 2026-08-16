@@ -30,6 +30,19 @@ export interface TargetIndicatorSnapshot {
   edge: boolean
 }
 
+export interface FlightDebugSnapshot {
+  mouseDx: number
+  mouseDy: number
+  yawRate: number
+  pitchRate: number
+  rollRate: number
+  throttle: number
+  velocity: Cartesian3
+  forward: Cartesian3
+  orientation: Quaternion
+  pointerLock: boolean
+}
+
 export interface ExplorationHudSnapshot {
   altitudeKm: number
   speedKmS: number
@@ -43,4 +56,5 @@ export interface ExplorationHudSnapshot {
   targetName: string | null
   targetDistanceKm: number | null
   targetIndicator: TargetIndicatorSnapshot | null
+  debugFlight: FlightDebugSnapshot
 }
