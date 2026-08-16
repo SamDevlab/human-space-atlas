@@ -48,6 +48,8 @@ kbd { position: absolute; top: 11px; right: 12px; color: #718096; font-size: 10p
 .microcopy { margin: 16px 0 0; color: #74859d; font-size: 11px; line-height: 1.5; }
 .catalog-counts { position: absolute; z-index: 10; top: calc(var(--hud-edge) + var(--topbar-height) + var(--hud-gap)); right: calc(var(--hud-edge) + var(--right-panel-width) + var(--hud-gap)); display: flex; align-items: center; gap: 7px; padding: 9px 11px; border-radius: 10px; color: #c0d0e2; font-size: 11px; }
 .catalog-counts small { color: #718199; }
+.event-count { position: absolute; z-index: 10; top: calc(var(--hud-edge) + var(--topbar-height) + var(--hud-gap) + 43px); right: calc(var(--hud-edge) + var(--right-panel-width) + var(--hud-gap)); display: flex; align-items: center; gap: 7px; padding: 8px 11px; border-radius: 10px; color: #c0d0e2; font-size: 10px; letter-spacing: .08em; }
+.event-count b { color: #9cd8ff; font-size: 9px; font-weight: 500; letter-spacing: 0; }
 .settings-popover { position: absolute; z-index: var(--z-popover); top: calc(var(--hud-edge) + var(--topbar-height) + var(--hud-gap)); right: var(--hud-edge); width: min(320px, calc(100vw - 2 * var(--hud-edge))); max-height: calc(100vh - var(--hud-edge) * 2 - var(--topbar-height) - var(--bottom-height) - var(--hud-gap) * 2); overflow-y: auto; padding: 17px; border-radius: 15px; scrollbar-width: thin; scrollbar-color: #49637d transparent; }
 .home-setting, .map-style-list button { display: flex; align-items: center; gap: 11px; width: 100%; padding: 9px 10px; border: 1px solid transparent; border-radius: 8px; color: #c4d4e4; background: transparent; text-align: left; }
 .home-setting:hover, .map-style-list button:hover, .map-style-list button.active { border-color: rgba(113,203,255,.25); background: rgba(56,143,200,.18); }
@@ -66,6 +68,14 @@ kbd { position: absolute; top: 11px; right: 12px; color: #718096; font-size: 10p
 .density-list button:hover, .density-list button.active { border-color: rgba(113,203,255,.25); color: #eaf7ff; background: rgba(56,143,200,.18); }
 .density-list small { color: #7189a1; }
 .small-control { display: grid; gap: 8px; margin-top: 17px; color: #a9b8cb; font-size: 11px; }
+.layer-toggle { display: flex; align-items: center; gap: 9px; margin-top: 17px; color: #c4d4e4; font-size: 11px; }
+.layer-toggle input { width: 15px; height: 15px; accent-color: #79cfff; }
+.layer-toggle > span { display: grid; gap: 3px; flex: 1; }
+.layer-toggle small { color: #7189a1; font-size: 9px; line-height: 1.35; }
+.layer-toggle b { color: #8fe0ff; font-size: 9px; letter-spacing: .1em; }
+.event-category-list { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 10px; margin-top: 13px; padding: 9px 10px; border: 1px solid rgba(255,255,255,.06); border-radius: 8px; background: rgba(255,255,255,.025); }
+.event-category-list label { display: flex; align-items: center; gap: 6px; color: #91a6bb; font-size: 9px; line-height: 1.2; }
+.event-category-list input { width: 12px; height: 12px; accent-color: #79cfff; }
 input[type=range] { width: 100%; accent-color: #79cfff; }
 .warning-copy { color: #f0c877; font-size: 11px; }
 .error-box { margin-top: 12px; padding: 10px; border-radius: 9px; color: #ffacb9; background: rgba(255,80,110,.1); font-size: 11px; }
@@ -85,6 +95,7 @@ input[type=range] { width: 100%; accent-color: #79cfff; }
 .details dl > div { padding: 10px; border: 1px solid rgba(255,255,255,.06); border-radius: 8px; background: rgba(255,255,255,.035); }
 .details dt { color: #73869e; font-size: 9px; letter-spacing: .1em; }
 .details dd { margin: 5px 0 0; color: #e4effb; font-size: 13px; font-variant-numeric: tabular-nums; }
+.event-description { margin: 0 0 16px; color: #8fa5b8; font-size: 11px; line-height: 1.5; }
 .empty-inspector { padding: 48px 10px 42px; text-align: center; }
 .empty-inspector > span { color: #7fcff5; font-size: 24px; }
 .empty-inspector p { margin: 13px 0 5px; color: #c1cede; font-size: 13px; }
@@ -113,6 +124,18 @@ input[type=range] { width: 100%; accent-color: #79cfff; }
 .explore-target-marker div { display: grid; gap: 2px; }
 .explore-target-marker strong { font-size: 10px; letter-spacing: .1em; }
 .explore-target-marker small { color: #8fa8b9; font-size: 10px; }
+.autopilot-engage { position: absolute; z-index: 3; top: 198px; right: var(--hud-edge); padding: 8px 11px; border: 1px solid rgba(103,229,176,.42); border-radius: 8px; color: #b9f8d8; background: rgba(18,83,65,.35); font-size: 10px; letter-spacing: .1em; pointer-events: auto; }
+.autopilot-engage:hover { border-color: rgba(133,255,195,.72); background: rgba(18,112,80,.48); }
+.autopilot-panel { position: absolute; z-index: 3; top: 198px; right: var(--hud-edge); display: grid; gap: 8px; width: min(250px, calc(100vw - 36px)); padding: 12px; border: 1px solid rgba(103,229,176,.36); border-radius: 10px; color: #c8e2e0; background: rgba(3,18,21,.86); box-shadow: 0 16px 40px rgba(0,0,0,.28); pointer-events: auto; }
+.autopilot-heading, .autopilot-stats { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.autopilot-heading strong { color: #8bf0be; font-size: 10px; letter-spacing: .14em; }
+.autopilot-heading span { color: #9becc3; font-size: 9px; letter-spacing: .08em; }
+.autopilot-target { overflow: hidden; color: #e5fbf2; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.autopilot-stats { color: #739a9c; font-size: 9px; letter-spacing: .05em; }
+.autopilot-stats span { display: grid; gap: 3px; }
+.autopilot-stats b { color: #d8f7eb; font-size: 10px; font-weight: 500; letter-spacing: 0; }
+.autopilot-panel > button { padding: 7px; border: 1px solid rgba(141,239,190,.28); border-radius: 7px; color: #bdf7d8; background: rgba(103,229,176,.1); font-size: 9px; letter-spacing: .12em; }
+.autopilot-panel > button:hover { background: rgba(103,229,176,.2); }
 .explore-reticle { position: absolute; top: 50%; left: 50%; display: flex; align-items: center; gap: 11px; transform: translate(-50%, -50%); color: rgba(163,225,250,.55); }
 .explore-reticle i { display: block; width: 24px; height: 1px; background: currentColor; }
 .explore-reticle b { font-size: 16px; font-weight: 400; }

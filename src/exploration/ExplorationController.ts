@@ -10,8 +10,9 @@ import {
 import { createShipState, formatDistanceKm, getShipBasis, integrateShip, LOW_ALTITUDE_WARNING_METERS } from './flightModel'
 import { ShipCameraRig } from './ShipCameraRig'
 import { ShipVisual } from './ShipVisual'
+import { AUTOPILOT_STANDOFF_METERS, computeAutopilotGuidance } from './autopilot'
 import { combineAngularInput, resolveKeyboardAngularInput, resolveMouseAngularInput } from './explorationInput'
-import type { ExplorationCameraMode, ExplorationHudSnapshot, FlightInput, ShipState, TargetIndicatorSnapshot } from './types'
+import type { AutopilotMode, ExplorationCameraMode, ExplorationHudSnapshot, FlightInput, ShipState, TargetIndicatorSnapshot } from './types'
 
 interface ControllerOptions {
   onHudUpdate: (snapshot: ExplorationHudSnapshot) => void
@@ -32,7 +33,9 @@ export class ExplorationController {
   private readonly shipVisual: ShipVisual
   private state: ShipState | null = null
   private targetPosition: Cartesian3 | null = null
+  private targetVelocity = Cartesian3.ZERO.clone()
   private targetName: string | null = null
+  private autopilotMode: AutopilotMode = 'OFF'
   private active = false
   private frameHandle = 0
   private lastFrame = 0
@@ -150,11 +153,13 @@ export class ExplorationController {
 
   isActive(): boolean { return this.active }
 
-  enter(targetPosition: Cartesian3 | null, targetName: string | null): void {
+  enter(targetPosition: Cartesian3 | null, targetName: string | null, targetVelocity: Cartesian3 | null = null): void {
     if (this.active) return
     this.active = true
     this.targetPosition = targetPosition?.clone() ?? null
+    this.targetVelocity = targetVelocity?.clone() ?? Cartesian3.ZERO.clone()
     this.targetName = targetName
+    this.autopilotMode = 'OFF'
     const spawn = this.spawnPosition(targetPosition)
     this.state = createShipState(spawn, this.createTangentOrientation(spawn))
     this.shipVisual.setVisible(true)
@@ -178,7 +183,9 @@ export class ExplorationController {
     this.viewer.scene.screenSpaceCameraController.enableInputs = this.savedInputs
     this.state = null
     this.targetPosition = null
+    this.targetVelocity = Cartesian3.ZERO.clone()
     this.targetName = null
+    this.autopilotMode = 'OFF'
   }
 
   destroy(): void {
@@ -186,9 +193,19 @@ export class ExplorationController {
     this.shipVisual.destroy(this.viewer)
   }
 
-  setTarget(position: Cartesian3 | null, name: string | null): void {
+  setTarget(position: Cartesian3 | null, name: string | null, velocity: Cartesian3 | null = null): void {
     this.targetPosition = position?.clone() ?? null
+    this.targetVelocity = velocity?.clone() ?? Cartesian3.ZERO.clone()
     this.targetName = name
+    if (!this.targetPosition) this.autopilotMode = 'OFF'
+  }
+
+  engageAutopilot(): void {
+    if (this.active && this.targetPosition) this.autopilotMode = 'INTERCEPT'
+  }
+
+  cancelAutopilot(): void {
+    this.autopilotMode = 'OFF'
   }
 
   setSteeringSensitivity(value: number): void {
@@ -222,7 +239,7 @@ export class ExplorationController {
     this.lastMouseDy = mouseDy
     this.mouseX = 0
     this.mouseY = 0
-    return {
+    const manualInput: FlightInput = {
       throttleDelta: (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0),
       strafe: (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0),
       vertical: (this.keys.has('Space') ? 1 : 0) - (this.keys.has('ControlLeft') || this.keys.has('ControlRight') ? 1 : 0),
@@ -232,6 +249,24 @@ export class ExplorationController {
       boost: this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'),
       brake: this.keys.has('KeyX'),
     }
+    const manualOverride = Math.abs(mouseDx) > 1 || Math.abs(mouseDy) > 1 || ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'Space', 'ControlLeft', 'ControlRight', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'KeyX'].some((key) => this.keys.has(key))
+    if (this.autopilotMode === 'OFF' || !this.targetPosition || manualOverride) {
+      if (manualOverride) this.autopilotMode = 'OFF'
+      return manualInput
+    }
+
+    this.updateAutopilotMode()
+    const guidance = computeAutopilotGuidance(this.state!, this.targetPosition, this.targetVelocity, this.autopilotMode)
+    return { ...manualInput, ...guidance.input, strafe: 0, vertical: 0 }
+  }
+
+  private updateAutopilotMode(): void {
+    if (!this.state || !this.targetPosition || this.autopilotMode === 'OFF') return
+    const distance = Cartesian3.distance(this.state.position, this.targetPosition)
+    const relativeSpeed = Cartesian3.magnitude(Cartesian3.subtract(this.state.velocity, this.targetVelocity, new Cartesian3()))
+    if (this.autopilotMode === 'INTERCEPT' && distance <= 80_000) this.autopilotMode = 'APPROACH'
+    else if (this.autopilotMode === 'APPROACH' && distance <= AUTOPILOT_STANDOFF_METERS * 1.25 && relativeSpeed < 350) this.autopilotMode = 'HOLD'
+    else if (this.autopilotMode === 'HOLD' && distance > 30_000) this.autopilotMode = 'APPROACH'
   }
 
   private emitHud(now: number): void {
@@ -240,6 +275,8 @@ export class ExplorationController {
     const cartographic = Cartographic.fromCartesian(this.state.position)
     const targetDistanceKm = this.targetPosition ? Cartesian3.distance(this.state.position, this.targetPosition) / 1000 : null
     const basis = getShipBasis(this.state.orientation)
+    const relativeSpeedKmS = this.targetPosition ? Cartesian3.magnitude(Cartesian3.subtract(this.state.velocity, this.targetVelocity, new Cartesian3())) / 1000 : null
+    const guidance = this.targetPosition && this.autopilotMode !== 'OFF' ? computeAutopilotGuidance(this.state, this.targetPosition, this.targetVelocity, this.autopilotMode) : null
     this.options.onHudUpdate({
       altitudeKm: cartographic?.height ? Math.max(0, cartographic.height / 1000) : 0,
       speedKmS: Cartesian3.magnitude(this.state.velocity) / 1000,
@@ -253,6 +290,13 @@ export class ExplorationController {
       targetName: this.targetName,
       targetDistanceKm,
       targetIndicator: this.targetPosition ? this.getTargetIndicator(this.targetPosition) : null,
+      autopilot: {
+        mode: this.autopilotMode,
+        targetName: this.targetName,
+        distanceKm: targetDistanceKm,
+        relativeSpeedKmS,
+        etaSeconds: guidance?.etaSeconds ?? null,
+      },
       debugFlight: {
         mouseDx: this.lastMouseDx,
         mouseDy: this.lastMouseDy,

@@ -3,6 +3,7 @@ import {
   Cartesian3,
   Cartesian2,
   Color,
+  ImageryLayer,
   Ion,
   PointPrimitiveCollection,
   ScreenSpaceEventHandler,
@@ -10,6 +11,9 @@ import {
   Viewer,
 } from 'cesium'
 import { discoverMapStyles } from '../lib/mapStyles'
+import { createNasaCloudProvider } from '../lib/earthLayers'
+import { eventColor } from '../lib/earthEvents'
+import type { EarthEvent } from '../lib/earthEvents'
 import type { OmmRecord } from '../lib/types'
 import { createSatrec, sampleOrbit, toCesiumHeightMeters } from '../lib/orbit'
 import type { WorkerCommand, WorkerResult } from '../workers/orbitProtocol'
@@ -25,11 +29,23 @@ interface GlobeProps {
   onPerformance?: (metric: { workerMs: number; applyMs: number; transferBytes: number; pending: number }) => void
   homeRequest?: number
   mapStyle?: string
+  cloudsEnabled?: boolean
+  cloudOpacity?: number
+  onCloudError?: () => void
+  earthEvents?: EarthEvent[]
+  earthEventsEnabled?: boolean
+  eventCategories?: string[]
+  onEarthEventSelect?: (eventId: string | null) => void
+  eventViewRequest?: number
+  eventViewPosition?: Cartesian3 | null
   onMapStyleError?: () => void
   onMapStyleLoading?: (loading: boolean) => void
   explorationActive?: boolean
   targetPosition?: Cartesian3 | null
+  targetVelocity?: Cartesian3 | null
   targetName?: string | null
+  autopilotAction?: 'ENGAGE' | 'CANCEL' | null
+  autopilotRequest?: number
   onExplorationHud?: (snapshot: ExplorationHudSnapshot) => void
   onExitExplore?: () => void
   onOpenExploreNav?: () => void
@@ -40,7 +56,7 @@ interface GlobeProps {
 
 const POINT_SIZE = 5
 
-export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', onMapStyleError, onMapStyleLoading, explorationActive = false, targetPosition = null, targetName = null, onExplorationHud, onExitExplore, onOpenExploreNav, onExploreActivity, explorationSteeringSensitivity = 1, explorationCameraSensitivity = 1 }: GlobeProps) {
+export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', cloudsEnabled = true, cloudOpacity = 0.55, onCloudError, earthEvents = [], earthEventsEnabled = true, eventCategories = [], onEarthEventSelect, eventViewRequest = 0, eventViewPosition = null, onMapStyleError, onMapStyleLoading, explorationActive = false, targetPosition = null, targetVelocity = null, targetName = null, autopilotAction = null, autopilotRequest = 0, onExplorationHud, onExitExplore, onOpenExploreNav, onExploreActivity, explorationSteeringSensitivity = 1, explorationCameraSensitivity = 1 }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
@@ -49,6 +65,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   const requestRef = useRef(0)
   const latestAppliedRequestRef = useRef(0)
   const defaultImageryRef = useRef<unknown>(null)
+  const cloudLayerRef = useRef<ImageryLayer | null>(null)
   const imageryRequestRef = useRef(0)
   const explorationRef = useRef<ExplorationController | null>(null)
 
@@ -101,9 +118,14 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     workerRef.current = worker
 
     const handler = new ScreenSpaceEventHandler(viewer.scene.canvas)
-    handler.setInputAction((movement: { position: Cartesian2 }) => {
+      handler.setInputAction((movement: { position: Cartesian2 }) => {
       if (explorationRef.current?.isActive()) return
       const picked = viewer.scene.pick(movement.position)
+      const earthEventId = picked?.id?.properties?.earthEventId?.getValue?.(viewer.clock.currentTime) ?? picked?.id?.earthEventId
+      if (typeof earthEventId === 'string') {
+        onEarthEventSelect?.(earthEventId)
+        return
+      }
       const id = picked?.id?.catalogId
       onSelect(typeof id === 'number' ? id : null)
     }, ScreenSpaceEventType.LEFT_CLICK)
@@ -123,11 +145,17 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   useEffect(() => {
     const controller = explorationRef.current
     if (!controller) return
-    if (explorationActive) controller.enter(targetPosition, targetName)
+    if (explorationActive) controller.enter(targetPosition, targetName, targetVelocity)
     else controller.exit()
   }, [explorationActive])
 
-  useEffect(() => { explorationRef.current?.setTarget(targetPosition, targetName) }, [targetPosition, targetName])
+  useEffect(() => { explorationRef.current?.setTarget(targetPosition, targetName, targetVelocity) }, [targetPosition, targetName, targetVelocity])
+  useEffect(() => {
+    const controller = explorationRef.current
+    if (!controller || !autopilotAction || autopilotRequest === 0) return
+    if (autopilotAction === 'ENGAGE') controller.engageAutopilot()
+    else controller.cancelAutopilot()
+  }, [autopilotAction, autopilotRequest])
   useEffect(() => {
     explorationRef.current?.setSteeringSensitivity(explorationSteeringSensitivity)
     explorationRef.current?.setCameraSensitivity(explorationCameraSensitivity)
@@ -150,8 +178,9 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     let cancelled = false
     if (definition.isDefault) {
       if (defaultImageryRef.current && current.imageryProvider !== defaultImageryRef.current) {
-        viewer.imageryLayers.removeAll(false)
+        viewer.imageryLayers.remove(current, false)
         viewer.imageryLayers.addImageryProvider(defaultImageryRef.current as Parameters<typeof viewer.imageryLayers.addImageryProvider>[0])
+        if (cloudLayerRef.current) viewer.imageryLayers.raiseToTop(cloudLayerRef.current)
       }
       onMapStyleLoading?.(false)
       return () => { cancelled = true }
@@ -163,15 +192,44 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       if (cancelled || requestId !== imageryRequestRef.current || !provider) return
       const commit = () => {
         if (cancelled || requestId !== imageryRequestRef.current) return
-        viewer.imageryLayers.removeAll(false)
+        viewer.imageryLayers.remove(current, false)
         if (Array.isArray(provider)) provider.forEach((item) => viewer.imageryLayers.addImageryProvider(item))
         else viewer.imageryLayers.addImageryProvider(provider)
+        if (cloudLayerRef.current) viewer.imageryLayers.raiseToTop(cloudLayerRef.current)
         onMapStyleLoading?.(false)
       }
       commitTimer = window.setTimeout(commit, Math.max(0, 160 - (performance.now() - startedAt)))
     }).catch(() => { if (!cancelled && requestId === imageryRequestRef.current) { onMapStyleLoading?.(false); onMapStyleError?.() } })
     return () => { cancelled = true; if (commitTimer !== null) window.clearTimeout(commitTimer) }
   }, [mapStyle, onMapStyleError, onMapStyleLoading])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    if (!viewer.isDestroyed() && cloudLayerRef.current) {
+      viewer.imageryLayers.remove(cloudLayerRef.current, false)
+      cloudLayerRef.current = null
+    }
+    if (!cloudsEnabled) return
+    try {
+      const layer = viewer.imageryLayers.addImageryProvider(createNasaCloudProvider())
+      layer.alpha = cloudOpacity
+      cloudLayerRef.current = layer
+      viewer.imageryLayers.raiseToTop(layer)
+    } catch {
+      onCloudError?.()
+    }
+    return () => {
+      if (!viewer.isDestroyed() && cloudLayerRef.current) {
+        viewer.imageryLayers.remove(cloudLayerRef.current, false)
+        cloudLayerRef.current = null
+      }
+    }
+  }, [cloudsEnabled, onCloudError])
+
+  useEffect(() => {
+    if (cloudLayerRef.current) cloudLayerRef.current.alpha = Math.max(0, Math.min(1, cloudOpacity))
+  }, [cloudOpacity])
 
   useEffect(() => {
     const worker = workerRef.current
@@ -198,6 +256,39 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       })
     }
   }, [objects, selectedId])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    for (const entity of viewer.entities.values.filter((item) => String(item.id).startsWith('earth-event-'))) viewer.entities.remove(entity)
+    if (!earthEventsEnabled) return
+    const allowed = new Set(eventCategories)
+    for (const event of earthEvents) {
+      if (allowed.size && !allowed.has(event.categoryId)) continue
+      const color = Color.fromCssColorString(eventColor(event.categoryId))
+      const id = `earth-event-${event.id}`
+      if (event.geometry.type === 'Point') {
+        viewer.entities.add({
+          id,
+          position: Cartesian3.fromDegrees(event.geometry.coordinates[0], event.geometry.coordinates[1]),
+          properties: { earthEventId: event.id },
+          point: { pixelSize: 9, color, outlineColor: Color.WHITE, outlineWidth: 1, heightReference: 0 },
+        })
+      } else {
+        viewer.entities.add({
+          id,
+          properties: { earthEventId: event.id },
+          polygon: { hierarchy: Cartesian3.fromDegreesArray(event.geometry.coordinates.flat()), material: color.withAlpha(0.25), outline: true, outlineColor: color, height: 2_000 },
+        })
+      }
+    }
+  }, [earthEvents, earthEventsEnabled, eventCategories, onEarthEventSelect])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer || eventViewRequest === 0 || !eventViewPosition) return
+    viewer.camera.flyTo({ destination: eventViewPosition, duration: 0.8 })
+  }, [eventViewRequest, eventViewPosition])
 
   useEffect(() => {
     const worker = workerRef.current

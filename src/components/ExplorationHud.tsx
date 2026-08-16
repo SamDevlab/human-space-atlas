@@ -7,6 +7,8 @@ interface ExplorationHudProps {
   onExit: () => void
   onOpenNav: () => void
   onOpenSettings: () => void
+  onEngageAutopilot: () => void
+  onCancelAutopilot: () => void
   controlsHelpVisible: boolean
   onDismissHelp: () => void
 }
@@ -26,7 +28,7 @@ function vectorLabel(vector: { x: number; y: number; z: number }): string {
   return `${vector.x.toFixed(2)}  ${vector.y.toFixed(2)}  ${vector.z.toFixed(2)}`
 }
 
-export function ExplorationHud({ snapshot, debugFlight, onExit, onOpenNav, onOpenSettings, controlsHelpVisible, onDismissHelp }: ExplorationHudProps) {
+export function ExplorationHud({ snapshot, debugFlight, onExit, onOpenNav, onOpenSettings, onEngageAutopilot, onCancelAutopilot, controlsHelpVisible, onDismissHelp }: ExplorationHudProps) {
   const marker = snapshot.targetIndicator
   const markerStyle = marker ? { left: `${marker.x}px`, top: `${marker.y}px` } : undefined
   const arrowStyle = marker?.edge ? { transform: `rotate(${marker.angle}rad)` } : undefined
@@ -45,6 +47,13 @@ export function ExplorationHud({ snapshot, debugFlight, onExit, onOpenNav, onOpe
     {snapshot.targetName && marker && <div className={`explore-target-marker ${marker.edge ? 'edge' : ''}`} style={markerStyle as CSSProperties}>
       <span className="target-arrow" style={arrowStyle}>{marker.edge ? '➜' : '◇'}</span>
       <div><strong>{snapshot.targetName}</strong><small>{snapshot.targetDistanceKm === null ? '—' : snapshot.targetDistanceKm < 1 ? `${(snapshot.targetDistanceKm * 1000).toFixed(0)} m` : `${snapshot.targetDistanceKm.toFixed(snapshot.targetDistanceKm < 10 ? 1 : 0)} km`}</small></div>
+    </div>}
+    {snapshot.targetName && snapshot.autopilot.mode === 'OFF' && <button className="autopilot-engage" onClick={onEngageAutopilot}>AUTOPILOT</button>}
+    {snapshot.autopilot.mode !== 'OFF' && <div className="autopilot-panel">
+      <div className="autopilot-heading"><strong>AUTOPILOT</strong><span>● {snapshot.autopilot.mode}</span></div>
+      <strong className="autopilot-target">{snapshot.autopilot.targetName ?? 'TARGET'}</strong>
+      <div className="autopilot-stats"><span>DIST <b>{snapshot.autopilot.distanceKm === null ? '—' : `${snapshot.autopilot.distanceKm.toFixed(snapshot.autopilot.distanceKm < 10 ? 1 : 0)} km`}</b></span><span>REL SPD <b>{snapshot.autopilot.relativeSpeedKmS === null ? '—' : `${snapshot.autopilot.relativeSpeedKmS.toFixed(2)} km/s`}</b></span><span>ETA <b>{snapshot.autopilot.etaSeconds === null ? '—' : `~${Math.max(1, Math.round(snapshot.autopilot.etaSeconds))} s`}</b></span></div>
+      <button onClick={onCancelAutopilot}>CANCEL</button>
     </div>}
 
     <div className="explore-reticle" aria-hidden="true"><i /><b>+</b><i /></div>

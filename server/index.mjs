@@ -3,7 +3,9 @@ import { URL, pathToFileURL } from 'node:url'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const CACHE_TTL_MS = 2 * 60 * 60 * 1000
+const EVENT_CACHE_TTL_MS = 15 * 60 * 1000
 const CATALOG_GROUPS = new Set(['stations', 'active', 'starlink', 'gps-ops'])
+const EONET_STATUSES = new Set(['open', 'closed', 'all'])
 const cache = new Map()
 
 export function resetCache() {
@@ -91,6 +93,28 @@ async function handleHorizons(url, res) {
   })
 }
 
+async function handleEarthEvents(url, res) {
+  const status = (url.searchParams.get('status') ?? 'open').toLowerCase()
+  if (!EONET_STATUSES.has(status)) return json(res, 400, { error: 'Unsupported event status', allowed: [...EONET_STATUSES] })
+  const rawDays = Number(url.searchParams.get('days') ?? 30)
+  const rawLimit = Number(url.searchParams.get('limit') ?? 500)
+  const days = Number.isFinite(rawDays) ? Math.max(1, Math.min(60, rawDays)) : 30
+  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, rawLimit)) : 500
+  const upstream = new URL('https://eonet.gsfc.nasa.gov/api/v3/events')
+  upstream.searchParams.set('status', status)
+  upstream.searchParams.set('days', String(days))
+  upstream.searchParams.set('limit', String(limit))
+  const result = await fetchWithCache(`eonet:${upstream.searchParams.toString()}`, upstream, EVENT_CACHE_TTL_MS)
+  return json(res, 200, {
+    source: 'nasa-eonet-v3',
+    fetchedAt: result.fetchedAt,
+    cache: result.cache,
+    status,
+    days,
+    events: Array.isArray(result.value?.events) ? result.value.events : [],
+  })
+}
+
 export function createApp() {
   return http.createServer(async (req, res) => {
   if (!req.url) return json(res, 400, { error: 'Missing URL' })
@@ -112,6 +136,7 @@ export function createApp() {
     }
     if (req.method === 'GET' && url.pathname === '/api/catalog') return await handleCatalog(url, res)
     if (req.method === 'GET' && url.pathname === '/api/horizons') return await handleHorizons(url, res)
+    if (req.method === 'GET' && url.pathname === '/api/earth/events') return await handleEarthEvents(url, res)
     return json(res, 404, { error: 'Not found' })
   } catch (error) {
     console.error(error)

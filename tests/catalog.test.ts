@@ -10,6 +10,8 @@ import { Cartesian3, Cartographic, Quaternion } from 'cesium'
 import { createShipState, getShipBasis, integrateShip, MAX_ANGULAR_SPEED_RADIANS_PER_SECOND, MAX_SPEED_METERS_PER_SECOND, MIN_ALTITUDE_METERS } from '../src/exploration/flightModel'
 import { combineAngularInput, resolveKeyboardAngularInput, resolveMouseAngularInput } from '../src/exploration/explorationInput'
 import { applyCameraOrbit, applyCameraZoom, clampCameraPitch, DEFAULT_CAMERA_DISTANCE_METERS, MAX_CAMERA_DISTANCE_METERS, MIN_CAMERA_DISTANCE_METERS } from '../src/exploration/ShipCameraRig'
+import { AUTOPILOT_STANDOFF_METERS, computeAutopilotGuidance } from '../src/exploration/autopilot'
+import { normalizeEarthEvents } from '../src/lib/earthEvents'
 
 const record = (id: number, type: string, name: string): OmmRecord => ({
   OBJECT_NAME: name, EPOCH: '2026-08-16T00:00:00.000Z', NORAD_CAT_ID: id,
@@ -179,6 +181,29 @@ describe('exploration ship frame and input fallbacks', () => {
   })
 })
 
+describe('exploration autopilot guidance', () => {
+  it('leads a moving target instead of aiming only at its current position', () => {
+    const state = createShipState(new Cartesian3(0, 0, 0), Quaternion.IDENTITY)
+    const guidance = computeAutopilotGuidance(state, new Cartesian3(100_000, 0, 0), new Cartesian3(0, 1_000, 0), 'INTERCEPT')
+    expect(guidance.input.yawRate).toBeGreaterThan(0)
+    expect(guidance.etaSeconds).toBeGreaterThan(0)
+  })
+
+  it('slows toward a ten-kilometer approach standoff', () => {
+    const state = { ...createShipState(new Cartesian3(0, 0, 0), Quaternion.IDENTITY), velocity: new Cartesian3(4_000, 0, 0) }
+    const guidance = computeAutopilotGuidance(state, new Cartesian3(20_000, 0, 0), Cartesian3.ZERO, 'APPROACH')
+    expect(guidance.input.brake).toBe(true)
+    expect(AUTOPILOT_STANDOFF_METERS).toBe(10_000)
+  })
+
+  it('holds at a standoff point rather than targeting the object center', () => {
+    const state = createShipState(new Cartesian3(12_000, 0, 0), Quaternion.IDENTITY)
+    const guidance = computeAutopilotGuidance(state, Cartesian3.ZERO, Cartesian3.ZERO, 'HOLD')
+    expect(guidance.distanceMeters).toBe(12_000)
+    expect(guidance.input.throttleDelta).toBeLessThanOrEqual(0)
+  })
+})
+
 describe('exploration camera rig math', () => {
   it('maps mouse orbit to yaw/pitch and clamps pitch', () => {
     const orbit = applyCameraOrbit({ yaw: 0, pitch: 0, distance: DEFAULT_CAMERA_DISTANCE_METERS }, 100, -100)
@@ -191,5 +216,28 @@ describe('exploration camera rig math', () => {
   it('clamps camera zoom to safe distances', () => {
     expect(applyCameraZoom({ yaw: 0, pitch: 0, distance: DEFAULT_CAMERA_DISTANCE_METERS }, -100_000).distance).toBe(MIN_CAMERA_DISTANCE_METERS)
     expect(applyCameraZoom({ yaw: 0, pitch: 0, distance: DEFAULT_CAMERA_DISTANCE_METERS }, 100_000).distance).toBe(MAX_CAMERA_DISTANCE_METERS)
+  })
+})
+
+describe('NASA Earth Events normalization', () => {
+  it('normalizes point events with category, source and magnitude metadata', () => {
+    const events = normalizeEarthEvents([{
+      id: 'EONET_1', title: 'Test wildfire', description: 'A test event', link: 'https://example.test/event',
+      categories: [{ id: 'wildfires', title: 'Wildfires' }], sources: [{ id: 'FIRMS', url: 'https://example.test/source' }],
+      geometry: [{ date: '2026-08-16T12:00:00Z', type: 'Point', coordinates: [-47.5, -15.7], magnitudeValue: 3, magnitudeUnit: 'acres' }],
+    }])
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ id: 'EONET_1', categoryId: 'wildfires', source: 'FIRMS', magnitudeValue: 3, magnitudeUnit: 'acres', geometry: { type: 'Point', coordinates: [-47.5, -15.7] } })
+  })
+
+  it('normalizes polygon events and tolerates missing optional metadata', () => {
+    const events = normalizeEarthEvents([{
+      id: 'EONET_2', title: 'Test flood', categories: [{ id: 'floods', title: 'Floods' }],
+      geometry: [{ type: 'Polygon', coordinates: [[[-1, 1], [1, 1], [1, -1], [-1, 1]]] }],
+    }, { id: 'invalid', title: 'No geometry', geometries: [] }])
+    expect(events).toHaveLength(1)
+    expect(events[0].geometry).toEqual({ type: 'Polygon', coordinates: [[-1, 1], [1, 1], [1, -1], [-1, 1]], date: null })
+    expect(events[0].magnitudeValue).toBeNull()
+    expect(events[0].magnitudeUnit).toBeNull()
   })
 })
