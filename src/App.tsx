@@ -31,6 +31,9 @@ function App() {
   const [explorerOpen, setExplorerOpen] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [searchFocused, setSearchFocused] = useState(false)
+  const [homeRequest, setHomeRequest] = useState(0)
+  const [mapStyle, setMapStyle] = useState<'default' | 'osm'>(() => localStorage.getItem('human-space-atlas.map-style') === 'osm' ? 'osm' : 'default')
+  const searchInputRef = useRef<HTMLInputElement>(null)
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
   const [performanceMetric, setPerformanceMetric] = useState({ workerMs: 0, applyMs: 0, transferBytes: 0, pending: 0 })
@@ -41,7 +44,10 @@ function App() {
   const onPerformance = useCallback((metric: typeof performanceMetric) => setPerformanceMetric(metric), [])
 
   useEffect(() => {
-    const closeOverlays = (event: KeyboardEvent) => { if (event.key === 'Escape') { setSettingsOpen(false); setSearchFocused(false) } }
+    const closeOverlays = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); searchInputRef.current?.focus(); setSettingsOpen(false); setSearchFocused(true) }
+      if (event.key === 'Escape') { setSettingsOpen(false); setSearchFocused(false) }
+    }
     const closeOnOutside = (event: MouseEvent) => {
       const target = event.target as Element
       if (!target.closest('.search-wrap')) setSearchFocused(false)
@@ -54,6 +60,7 @@ function App() {
 
   useEffect(() => { localStorage.setItem('human-space-atlas.render-mode', renderMode) }, [renderMode])
   useEffect(() => { localStorage.setItem('human-space-atlas.render-limit', String(customLimit)) }, [customLimit])
+  useEffect(() => { localStorage.setItem('human-space-atlas.map-style', mapStyle) }, [mapStyle])
   useEffect(() => {
     if (renderMode === 'AUTO') setAutoLimit(autoControllerRef.current.update(performanceMetric, performance.now()))
   }, [performanceMetric, renderMode])
@@ -139,12 +146,14 @@ function App() {
         selectedId={selectedId}
         onSelect={setSelectedId}
         onPerformance={onPerformance}
+        homeRequest={homeRequest}
+        mapStyle={mapStyle}
       />
       {new URLSearchParams(window.location.search).get('debug') === 'perf' && <PerformanceOverlay loaded={objects.length} visible={visibleObjects.length} {...performanceMetric} />}
 
       <header className="topbar glass">
         <button className="brand" onClick={() => { setSelectedId(null); setObjectQuery('') }} aria-label="Human Space Atlas home"><span className="brand-mark">◉</span><span>HUMAN SPACE ATLAS</span></button>
-        <div className="search-wrap"><span className="search-icon">⌕</span><input aria-label="Search satellites" placeholder="Search satellites or NORAD ID…" value={objectQuery} onFocus={() => { setSearchFocused(true); setSettingsOpen(false) }} onChange={(event) => { setObjectQuery(event.target.value); setSearchFocused(true) }} /><kbd>⌘ K</kbd>
+        <div className="search-wrap"><span className="search-icon">⌕</span><input ref={searchInputRef} aria-label="Search satellites" placeholder="Search satellites or NORAD ID..." value={objectQuery} onFocus={() => { setSearchFocused(true); setSettingsOpen(false) }} onChange={(event) => { setObjectQuery(event.target.value); setSearchFocused(true) }} />{objectQuery && <button className="clear-search" onClick={() => { setObjectQuery(''); searchInputRef.current?.focus() }} aria-label="Clear search">×</button>}<kbd>⌘ K</kbd>
           {searchFocused && objectQuery && <div className="search-dropdown">{filteredEntries.slice(0, 8).map((entry) => <button key={entry.id} onClick={() => { setSelectedId(entry.noradNumericId); setSearchFocused(false) }}><strong>{entry.name}</strong><span>NORAD {entry.noradId} · {entry.objectType}</span></button>)}</div>}
         </div>
         <div className="live-status">
@@ -154,7 +163,7 @@ function App() {
         <button className="icon-button" onClick={() => { setSettingsOpen((open) => !open); setSearchFocused(false) }} aria-label="Open settings" title="Settings">⚙</button>
       </header>
 
-      <aside className={`filters glass ${explorerOpen ? '' : 'collapsed'}`}>
+      {explorerOpen ? <aside className="filters glass">
         <button className="collapse-button" onClick={() => setExplorerOpen((open) => !open)} aria-label={explorerOpen ? 'Collapse explorer' : 'Open explorer'}>{explorerOpen ? '‹' : '☰'}</button>
         {explorerOpen && <>
         <span className="panel-title">Explore</span>
@@ -176,11 +185,11 @@ function App() {
         <p className="microcopy">OMM / JSON · local SGP4 propagation</p>
         {error && <div className="error-box">Unable to update orbital catalog<br /><small>Using cached data</small></div>}
         </>}
-      </aside>
+      </aside> : <button className="explorer-rail glass" onClick={() => setExplorerOpen(true)} aria-label="Open explorer" title="Open explorer">☰</button>}
 
       <div className="catalog-counts glass"><span className="live-dot" /> {filteredEntries.length.toLocaleString('en-US')} / {objects.length.toLocaleString('en-US')} objects <small>displayed</small></div>
 
-      {settingsOpen && <section className="settings-popover glass"><div className="popover-heading"><span className="panel-title">Settings</span><button className="close-button" onClick={() => setSettingsOpen(false)}>×</button></div><span className="panel-title section-label">Rendering density</span><div className="density-list">{(['AUTO', '1000', '2500', '5000', '10000', '25000', 'MAXIMUM'] as RenderMode[]).map((mode) => <button key={mode} className={renderMode === mode ? 'active' : ''} onClick={() => setRenderMode(mode)}><span>{mode === 'AUTO' ? 'Automatic' : mode === 'MAXIMUM' ? 'Maximum' : Number(mode).toLocaleString('en-US')}</span><small>{mode === 'AUTO' ? 'Recommended' : mode === '1000' ? 'Low' : mode === '5000' ? 'Balanced' : mode === '10000' ? 'High' : mode === '25000' ? 'Ultra' : ''}</small></button>)}</div><label className="small-control">Custom · {customLimit.toLocaleString('en-US')} objects<input type="range" min="1000" max="50000" step="500" value={customLimit} onChange={(event) => { setCustomLimit(Number(event.target.value)); setRenderMode('CUSTOM') }} /></label><p className="microcopy">Catalog: {objects.length.toLocaleString('en-US')} · Displayed: {visibleObjects.length.toLocaleString('en-US')}<br />The complete catalog remains searchable.</p>{renderLimit >= 25000 && <p className="warning-copy">High object densities may reduce performance.</p>}</section>}
+      {settingsOpen && <section className="settings-popover glass"><div className="popover-heading"><span className="panel-title">Settings</span><button className="close-button" onClick={() => setSettingsOpen(false)}>×</button></div><span className="panel-title section-label">View</span><button className="home-setting" onClick={() => setHomeRequest((request) => request + 1)} aria-label="Home"><span>⌂</span><div><strong>Home</strong><small>Return to Earth overview</small></div></button><span className="panel-title section-label">Map style</span><div className="map-style-list"><button className={mapStyle === 'default' ? 'active' : ''} onClick={() => setMapStyle('default')}><span className="map-preview satellite-preview" /><div><strong>Satellite</strong><small>{mapStyle === 'default' ? 'Current' : 'Default imagery'}</small></div></button><button className={mapStyle === 'osm' ? 'active' : ''} onClick={() => setMapStyle('osm')}><span className="map-preview map-preview-osm" /><div><strong>OpenStreetMap</strong><small>{mapStyle === 'osm' ? 'Current' : 'Street map'}</small></div></button></div><span className="panel-title section-label">Rendering density</span><div className="density-list">{(['AUTO', '1000', '2500', '5000', '10000', '25000', 'MAXIMUM'] as RenderMode[]).map((mode) => <button key={mode} className={renderMode === mode ? 'active' : ''} onClick={() => setRenderMode(mode)}><span>{mode === 'AUTO' ? 'Automatic' : mode === 'MAXIMUM' ? 'Maximum' : Number(mode).toLocaleString('en-US')}</span><small>{mode === 'AUTO' ? 'Recommended' : mode === '1000' ? 'Low' : mode === '5000' ? 'Balanced' : mode === '10000' ? 'High' : mode === '25000' ? 'Ultra' : ''}</small></button>)}</div><label className="small-control">Custom · {customLimit.toLocaleString('en-US')} objects<input type="range" min="1000" max="50000" step="500" value={customLimit} onChange={(event) => { setCustomLimit(Number(event.target.value)); setRenderMode('CUSTOM') }} /></label><p className="microcopy">Catalog: {objects.length.toLocaleString('en-US')} · Displayed: {visibleObjects.length.toLocaleString('en-US')}<br />The complete catalog remains searchable.</p>{renderLimit >= 25000 && <p className="warning-copy">High object densities may reduce performance.</p>}</section>}
 
       <section className="time-controls glass">
         <div>

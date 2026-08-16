@@ -5,6 +5,7 @@ import {
   Color,
   Ion,
   PointPrimitiveCollection,
+  OpenStreetMapImageryProvider,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   Viewer,
@@ -20,11 +21,13 @@ interface GlobeProps {
   selectedId: number | null
   onSelect: (catalogId: number | null) => void
   onPerformance?: (metric: { workerMs: number; applyMs: number; transferBytes: number; pending: number }) => void
+  homeRequest?: number
+  mapStyle?: 'default' | 'osm'
 }
 
 const POINT_SIZE = 5
 
-export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance }: GlobeProps) {
+export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'default' }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
@@ -32,6 +35,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   const generationRef = useRef(0)
   const requestRef = useRef(0)
   const latestAppliedRequestRef = useRef(0)
+  const defaultImageryRef = useRef<unknown>(null)
 
   const satrecs = useMemo(() => {
     const map = new Map<number, ReturnType<typeof createSatrec>>()
@@ -63,6 +67,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     })
 
     viewer.camera.setView({ destination: Cartesian3.fromDegrees(-18, 18, 18_000_000) })
+    defaultImageryRef.current = viewer.imageryLayers.get(0)?.imageryProvider ?? null
 
     viewer.scene.globe.enableLighting = true
     viewer.scene.backgroundColor = Color.fromCssColorString('#02040b')
@@ -90,6 +95,29 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       viewer.destroy()
     }
   }, [onSelect])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer || homeRequest === 0) return
+    viewer.camera.flyTo({ destination: Cartesian3.fromDegrees(-18, 18, 18_000_000), duration: 0.8 })
+  }, [homeRequest])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const current = viewer.imageryLayers.get(0)
+    if (!current) return
+    if (mapStyle === 'default') {
+      if (defaultImageryRef.current && current.imageryProvider !== defaultImageryRef.current) {
+        viewer.imageryLayers.removeAll(false)
+        viewer.imageryLayers.addImageryProvider(defaultImageryRef.current as Parameters<typeof viewer.imageryLayers.addImageryProvider>[0])
+      }
+      return
+    }
+    if (current.imageryProvider instanceof OpenStreetMapImageryProvider) return
+    viewer.imageryLayers.removeAll(false)
+    viewer.imageryLayers.addImageryProvider(new OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }))
+  }, [mapStyle])
 
   useEffect(() => {
     const worker = workerRef.current
