@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Cartesian3 } from 'cesium'
 import { Globe } from './components/Globe'
+import { ExplorationHud } from './components/ExplorationHud'
 import { PerformanceOverlay } from './components/PerformanceOverlay'
 import { fetchCatalog } from './lib/api'
-import { createSatrec, getOrbitState } from './lib/orbit'
+import { createSatrec, getOrbitState, toCesiumHeightMeters } from './lib/orbit'
 import { advanceSimulatedTime } from './lib/simulationClock'
 import { filterCatalog, normalizeCatalog } from './lib/orbitalCatalog'
 import { generateSyntheticCatalog } from './lib/syntheticCatalog'
 import { discoverMapStyles } from './lib/mapStyles'
 import { AutoRenderController, resolveRenderLimit, selectRenderSet, type RenderMode, RENDER_LIMITS } from './lib/renderSet'
 import type { CatalogGroup, OmmRecord } from './lib/types'
+import type { ExplorationHudSnapshot } from './exploration/types'
 
 const GROUPS: Array<{ value: CatalogGroup; label: string }> = [
   { value: 'stations', label: 'Stations' },
@@ -36,6 +39,8 @@ function App() {
   const mapStyles = useMemo(() => discoverMapStyles(), [])
   const [mapStyle, setMapStyle] = useState(() => { const saved = localStorage.getItem('human-space-atlas.map-style-v2'); return saved && mapStyles.some((style) => style.id === saved) ? saved : 'satellite' })
   const [mapStyleLoading, setMapStyleLoading] = useState(false)
+  const [explorationActive, setExplorationActive] = useState(false)
+  const [explorationHud, setExplorationHud] = useState<ExplorationHudSnapshot>({ altitudeKm: 0, speedKmS: 0, cameraMode: 'COCKPIT', flightAssist: true, targetName: null, targetDistanceKm: null })
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
@@ -47,6 +52,8 @@ function App() {
   const onPerformance = useCallback((metric: typeof performanceMetric) => setPerformanceMetric(metric), [])
   const onMapStyleError = useCallback(() => { setMapStyle('satellite'); setMapStyleLoading(false) }, [])
   const onMapStyleLoading = useCallback((loading: boolean) => setMapStyleLoading(loading), [])
+  const onExplorationHud = useCallback((snapshot: ExplorationHudSnapshot) => setExplorationHud(snapshot), [])
+  const onExitExplore = useCallback(() => setExplorationActive(false), [])
 
   useEffect(() => {
     const closeOverlays = (event: KeyboardEvent) => {
@@ -138,6 +145,8 @@ function App() {
     }
   }, [selected, simulatedAt])
 
+  const targetPosition = useMemo(() => selectedState ? Cartesian3.fromDegrees(selectedState.longitudeDeg, selectedState.latitudeDeg, toCesiumHeightMeters(selectedState.altitudeKm)) : null, [selectedState])
+
   function jumpToNow() {
     setSimulatedAt(new Date())
     if (speed === 0) setSpeed(1)
@@ -148,8 +157,14 @@ function App() {
     setMapStyle(styleId)
   }
 
+  function enterExploration() {
+    setSettingsOpen(false)
+    setSearchFocused(false)
+    setExplorationActive(true)
+  }
+
   return (
-    <main className={`app-shell ${settingsOpen ? 'settings-open' : ''}`}>
+    <main className={`app-shell ${settingsOpen ? 'settings-open' : ''} ${explorationActive ? 'explore-mode' : ''}`}>
       <Globe
         objects={visibleObjects}
         simulatedAt={simulatedAt}
@@ -160,11 +175,17 @@ function App() {
         mapStyle={mapStyle}
         onMapStyleError={onMapStyleError}
         onMapStyleLoading={onMapStyleLoading}
+        explorationActive={explorationActive}
+        targetPosition={targetPosition}
+        targetName={selected?.OBJECT_NAME ?? null}
+        onExplorationHud={onExplorationHud}
+        onExitExplore={onExitExplore}
       />
       {new URLSearchParams(window.location.search).get('debug') === 'perf' && <PerformanceOverlay loaded={objects.length} visible={visibleObjects.length} {...performanceMetric} />}
 
       <header className="topbar glass">
         <button className="brand" onClick={() => { setSelectedId(null); setObjectQuery('') }} aria-label="Human Space Atlas home"><span className="brand-mark">◉</span><span>HUMAN SPACE ATLAS</span></button>
+        <button className="mode-toggle" onClick={explorationActive ? onExitExplore : enterExploration}>{explorationActive ? 'ATLAS' : 'EXPLORE'}</button>
         <div className="search-wrap"><span className="search-icon">⌕</span><input ref={searchInputRef} aria-label="Search satellites" placeholder="Search satellites or NORAD ID..." value={objectQuery} onFocus={() => { setSearchFocused(true); setSettingsOpen(false) }} onChange={(event) => { setObjectQuery(event.target.value); setSearchFocused(true) }} />{objectQuery && <button className="clear-search" onClick={() => { setObjectQuery(''); searchInputRef.current?.focus() }} aria-label="Clear search">×</button>}<kbd>⌘ K</kbd>
           {searchFocused && objectQuery && <div className="search-dropdown">{filteredEntries.slice(0, 8).map((entry) => <button key={entry.id} onClick={() => { setSelectedId(entry.noradNumericId); setSearchFocused(false) }}><strong>{entry.name}</strong><span>NORAD {entry.noradId} · {entry.objectType}</span></button>)}</div>}
         </div>
@@ -239,6 +260,7 @@ function App() {
       </aside>
 
       <footer className="source-note">CelesTrak · OMM / JSON · SGP4 · CesiumJS</footer>
+      {explorationActive && <ExplorationHud snapshot={explorationHud} onExit={onExitExplore} onToggleCamera={() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC' }))} />}
     </main>
   )
 }

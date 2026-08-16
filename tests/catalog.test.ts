@@ -6,6 +6,8 @@ import { generateSyntheticCatalog } from '../src/lib/syntheticCatalog'
 import { percentile, summarizeDurations } from '../src/lib/performanceStats'
 import { AutoRenderController, resolveRenderLimit, selectRenderSet } from '../src/lib/renderSet'
 import { LatestOnlyQueue } from '../src/workers/latestOnlyQueue'
+import { Cartesian3, Cartographic } from 'cesium'
+import { createShipState, integrateShip, MIN_ALTITUDE_METERS } from '../src/exploration/flightModel'
 
 const record = (id: number, type: string, name: string): OmmRecord => ({
   OBJECT_NAME: name, EPOCH: '2026-08-16T00:00:00.000Z', NORAD_CAT_ID: id,
@@ -77,5 +79,29 @@ describe('active render set policy', () => {
     expect(controller.update({ workerMs: 300, applyMs: 1, frameP95Ms: 200 }, 1000)).toBe(2500)
     expect(controller.update({ workerMs: 1, applyMs: 1, frameP95Ms: 10 }, 1500)).toBe(2500)
     expect(controller.update({ workerMs: 1, applyMs: 1, frameP95Ms: 10 }, 2500)).toBe(5000)
+  })
+})
+
+describe('exploration flight model', () => {
+  it('uses real delta independently of simulated time multiplier', () => {
+    const state = createShipState(Cartesian3.fromDegrees(0, 0, 800_000))
+    const input = { forward: 1, strafe: 0, vertical: 0, yawRate: 0, pitchRate: 0, rollRate: 0, boost: false, brake: false }
+    const oneX = integrateShip(state, input, 0.016)
+    const hundredX = integrateShip(state, input, 0.016)
+    expect(Cartesian3.distance(oneX.position, hundredX.position)).toBe(0)
+    expect(Cartesian3.magnitude(oneX.velocity)).toBeGreaterThan(0)
+  })
+
+  it('keeps the ship outside the Earth safety boundary', () => {
+    const state = createShipState(Cartesian3.fromDegrees(0, 0, 10_000))
+    const next = integrateShip(state, { forward: 0, strafe: 0, vertical: 0, yawRate: 0, pitchRate: 0, rollRate: 0, boost: false, brake: false }, 0.016)
+    expect(Cartographic.fromCartesian(next.position).height).toBeGreaterThanOrEqual(MIN_ALTITUDE_METERS - 1)
+  })
+
+  it('supports six-axis thrust and speed limiting', () => {
+    const state = createShipState(Cartesian3.fromDegrees(0, 0, 800_000))
+    const next = integrateShip(state, { forward: 1, strafe: 1, vertical: 1, yawRate: 0, pitchRate: 0, rollRate: 1, boost: true, brake: false }, 0.1)
+    expect(Cartesian3.magnitude(next.velocity)).toBeLessThanOrEqual(50_000)
+    expect(next.angularVelocity.z).toBe(1)
   })
 })

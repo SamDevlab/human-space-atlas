@@ -14,6 +14,8 @@ import type { OmmRecord } from '../lib/types'
 import { createSatrec, sampleOrbit, toCesiumHeightMeters } from '../lib/orbit'
 import type { WorkerCommand, WorkerResult } from '../workers/orbitProtocol'
 import { shouldApplyPositionResult } from '../workers/workerState'
+import { ExplorationController } from '../exploration/ExplorationController'
+import type { ExplorationHudSnapshot } from '../exploration/types'
 
 interface GlobeProps {
   objects: OmmRecord[]
@@ -25,11 +27,16 @@ interface GlobeProps {
   mapStyle?: string
   onMapStyleError?: () => void
   onMapStyleLoading?: (loading: boolean) => void
+  explorationActive?: boolean
+  targetPosition?: Cartesian3 | null
+  targetName?: string | null
+  onExplorationHud?: (snapshot: ExplorationHudSnapshot) => void
+  onExitExplore?: () => void
 }
 
 const POINT_SIZE = 5
 
-export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', onMapStyleError, onMapStyleLoading }: GlobeProps) {
+export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', onMapStyleError, onMapStyleLoading, explorationActive = false, targetPosition = null, targetName = null, onExplorationHud, onExitExplore }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
@@ -39,6 +46,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   const latestAppliedRequestRef = useRef(0)
   const defaultImageryRef = useRef<unknown>(null)
   const imageryRequestRef = useRef(0)
+  const explorationRef = useRef<ExplorationController | null>(null)
 
   const satrecs = useMemo(() => {
     const map = new Map<number, ReturnType<typeof createSatrec>>()
@@ -78,12 +86,14 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     const points = viewer.scene.primitives.add(new PointPrimitiveCollection())
     pointsRef.current = points
     viewerRef.current = viewer
+    explorationRef.current = new ExplorationController(viewer, { onHudUpdate: (snapshot) => onExplorationHud?.(snapshot), onExit: () => onExitExplore?.() })
 
     const worker = new Worker(new URL('../workers/orbit.worker.ts', import.meta.url), { type: 'module' })
     workerRef.current = worker
 
     const handler = new ScreenSpaceEventHandler(viewer.scene.canvas)
     handler.setInputAction((movement: { position: Cartesian2 }) => {
+      if (explorationRef.current?.isActive()) return
       const picked = viewer.scene.pick(movement.position)
       const id = picked?.id?.catalogId
       onSelect(typeof id === 'number' ? id : null)
@@ -94,10 +104,21 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       pointsRef.current = null
       worker.postMessage({ type: 'DISPOSE' } satisfies WorkerCommand)
       workerRef.current = null
+      explorationRef.current?.destroy()
+      explorationRef.current = null
       viewerRef.current = null
       viewer.destroy()
     }
-  }, [onSelect])
+  }, [onSelect, onExplorationHud, onExitExplore])
+
+  useEffect(() => {
+    const controller = explorationRef.current
+    if (!controller) return
+    if (explorationActive) controller.enter(targetPosition, targetName)
+    else controller.exit()
+  }, [explorationActive])
+
+  useEffect(() => { explorationRef.current?.setTarget(targetPosition, targetName) }, [targetPosition, targetName])
 
   useEffect(() => {
     const viewer = viewerRef.current
