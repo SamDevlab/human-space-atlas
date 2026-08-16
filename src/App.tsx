@@ -30,6 +30,7 @@ function App() {
   const [objectQuery, setObjectQuery] = useState('')
   const [explorerOpen, setExplorerOpen] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [searchFocused, setSearchFocused] = useState(false)
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
   const [performanceMetric, setPerformanceMetric] = useState({ workerMs: 0, applyMs: 0, transferBytes: 0, pending: 0 })
@@ -38,6 +39,18 @@ function App() {
   const [autoLimit, setAutoLimit] = useState(5000)
   const autoControllerRef = useRef(new AutoRenderController())
   const onPerformance = useCallback((metric: typeof performanceMetric) => setPerformanceMetric(metric), [])
+
+  useEffect(() => {
+    const closeOverlays = (event: KeyboardEvent) => { if (event.key === 'Escape') { setSettingsOpen(false); setSearchFocused(false) } }
+    const closeOnOutside = (event: MouseEvent) => {
+      const target = event.target as Element
+      if (!target.closest('.search-wrap')) setSearchFocused(false)
+      if (!target.closest('.settings-popover, .icon-button')) setSettingsOpen(false)
+    }
+    document.addEventListener('keydown', closeOverlays)
+    document.addEventListener('mousedown', closeOnOutside)
+    return () => { document.removeEventListener('keydown', closeOverlays); document.removeEventListener('mousedown', closeOnOutside) }
+  }, [])
 
   useEffect(() => { localStorage.setItem('human-space-atlas.render-mode', renderMode) }, [renderMode])
   useEffect(() => { localStorage.setItem('human-space-atlas.render-limit', String(customLimit)) }, [customLimit])
@@ -119,7 +132,7 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${settingsOpen ? 'settings-open' : ''}`}>
       <Globe
         objects={visibleObjects}
         simulatedAt={simulatedAt}
@@ -131,14 +144,14 @@ function App() {
 
       <header className="topbar glass">
         <button className="brand" onClick={() => { setSelectedId(null); setObjectQuery('') }} aria-label="Human Space Atlas home"><span className="brand-mark">◉</span><span>HUMAN SPACE ATLAS</span></button>
-        <div className="search-wrap"><span className="search-icon">⌕</span><input aria-label="Search satellites" placeholder="Search satellites or NORAD ID…" value={objectQuery} onChange={(event) => setObjectQuery(event.target.value)} /><kbd>⌘ K</kbd>
-          {objectQuery && <div className="search-dropdown">{filteredEntries.slice(0, 5).map((entry) => <button key={entry.id} onClick={() => setSelectedId(entry.noradNumericId)}><strong>{entry.name}</strong><span>NORAD {entry.noradId} · {entry.objectType}</span></button>)}</div>}
+        <div className="search-wrap"><span className="search-icon">⌕</span><input aria-label="Search satellites" placeholder="Search satellites or NORAD ID…" value={objectQuery} onFocus={() => { setSearchFocused(true); setSettingsOpen(false) }} onChange={(event) => { setObjectQuery(event.target.value); setSearchFocused(true) }} /><kbd>⌘ K</kbd>
+          {searchFocused && objectQuery && <div className="search-dropdown">{filteredEntries.slice(0, 8).map((entry) => <button key={entry.id} onClick={() => { setSelectedId(entry.noradNumericId); setSearchFocused(false) }}><strong>{entry.name}</strong><span>NORAD {entry.noradId} · {entry.objectType}</span></button>)}</div>}
         </div>
         <div className="live-status">
           <span className="live-dot" />
           <div><strong>{objects.length ? 'LIVE' : 'CONNECTING'}</strong><span>{objects.length.toLocaleString('en-US')} objects</span></div>
         </div>
-        <button className="icon-button" onClick={() => setSettingsOpen((open) => !open)} aria-label="Open settings" title="Settings">⚙</button>
+        <button className="icon-button" onClick={() => { setSettingsOpen((open) => !open); setSearchFocused(false) }} aria-label="Open settings" title="Settings">⚙</button>
       </header>
 
       <aside className={`filters glass ${explorerOpen ? '' : 'collapsed'}`}>
@@ -184,7 +197,7 @@ function App() {
         </div>
       </section>
 
-      <aside className="details glass">
+      <aside className={`details ${selected ? 'glass inspector-open' : 'empty-inspector-panel'}`}>
         {selected ? (
           <>
             <div className="inspector-heading"><p className="eyebrow">OBJECT INSPECTOR</p><button className="close-button" onClick={() => setSelectedId(null)}>×</button></div>

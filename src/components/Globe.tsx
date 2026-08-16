@@ -51,9 +51,9 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     const viewer = new Viewer(containerRef.current, {
       animation: false,
       timeline: false,
-      baseLayerPicker: true,
+      baseLayerPicker: false,
       geocoder: false,
-      homeButton: true,
+      homeButton: false,
       sceneModePicker: false,
       navigationHelpButton: false,
       fullscreenButton: false,
