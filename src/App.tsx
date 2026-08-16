@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Globe } from './components/Globe'
 import { fetchCatalog } from './lib/api'
 import { createSatrec, getOrbitState } from './lib/orbit'
+import { advanceSimulatedTime } from './lib/simulationClock'
 import type { CatalogGroup, OmmRecord } from './lib/types'
 
 const GROUPS: Array<{ value: CatalogGroup; label: string }> = [
@@ -49,7 +50,7 @@ function App() {
 
     const timer = window.setInterval(() => {
       if (speed === 0) return
-      setSimulatedAt(new Date(startedSim + (Date.now() - startedReal) * speed))
+      setSimulatedAt(new Date(advanceSimulatedTime(startedSim, Date.now() - startedReal, speed)))
     }, 500)
 
     return () => window.clearInterval(timer)

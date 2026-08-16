@@ -1,10 +1,14 @@
 import http from 'node:http'
-import { URL } from 'node:url'
+import { URL, pathToFileURL } from 'node:url'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const CACHE_TTL_MS = 2 * 60 * 60 * 1000
 const CATALOG_GROUPS = new Set(['stations', 'active', 'starlink', 'gps-ops'])
 const cache = new Map()
+
+export function resetCache() {
+  cache.clear()
+}
 
 function json(res, status, payload, headers = {}) {
   res.writeHead(status, {
@@ -16,7 +20,7 @@ function json(res, status, payload, headers = {}) {
   res.end(JSON.stringify(payload))
 }
 
-async function fetchWithCache(key, url, ttl = CACHE_TTL_MS) {
+export async function fetchWithCache(key, url, ttl = CACHE_TTL_MS) {
   const now = Date.now()
   const cached = cache.get(key)
   if (cached && now - cached.storedAt < ttl) {
@@ -87,7 +91,8 @@ async function handleHorizons(url, res) {
   })
 }
 
-const server = http.createServer(async (req, res) => {
+export function createApp() {
+  return http.createServer(async (req, res) => {
   if (!req.url) return json(res, 400, { error: 'Missing URL' })
 
   if (req.method === 'OPTIONS') {
@@ -115,8 +120,12 @@ const server = http.createServer(async (req, res) => {
       detail: error instanceof Error ? error.message : String(error),
     })
   }
-})
+  })
+}
 
-server.listen(PORT, () => {
-  console.log(`Human Space Atlas API listening on http://localhost:${PORT}`)
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const server = createApp()
+  server.listen(PORT, () => {
+    console.log(`Human Space Atlas API listening on http://localhost:${PORT}`)
+  })
+}

@@ -7,6 +7,9 @@
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite",
     "dev:api": "node server/index.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -b",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "check:server": "node --check server/index.mjs && node --check scripts/dev.mjs"
@@ -23,7 +26,8 @@
     "@vitejs/plugin-react": "^6.0.4",
     "typescript": "^7.0.2",
     "vite": "^8.2.0",
-    "vite-plugin-cesium": "^1.2.23"
+    "vite-plugin-cesium": "^1.2.23",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=22.13.0"

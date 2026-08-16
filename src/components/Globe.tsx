@@ -10,7 +10,7 @@ import {
   Viewer,
 } from 'cesium'
 import type { OmmRecord } from '../lib/types'
-import { createSatrec, getOrbitState, sampleOrbit } from '../lib/orbit'
+import { createSatrec, getOrbitState, sampleOrbit, toCesiumHeightMeters } from '../lib/orbit'
 
 interface GlobeProps {
   objects: OmmRecord[]
@@ -117,7 +117,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
       point.position = Cartesian3.fromDegrees(
         state.longitudeDeg,
         state.latitudeDeg,
-        state.altitudeKm * 1000,
+        toCesiumHeightMeters(state.altitudeKm),
       )
       point.color = object.NORAD_CAT_ID === selectedId ? Color.CYAN : Color.WHITE
       point.pixelSize = object.NORAD_CAT_ID === selectedId ? 10 : POINT_SIZE
@@ -137,7 +137,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
     if (!satrec) return
 
     const positions = sampleOrbit(satrec, simulatedAt).map((state) =>
-      Cartesian3.fromDegrees(state.longitudeDeg, state.latitudeDeg, state.altitudeKm * 1000),
+      Cartesian3.fromDegrees(state.longitudeDeg, state.latitudeDeg, toCesiumHeightMeters(state.altitudeKm)),
     )
 
     if (positions.length > 1) {
