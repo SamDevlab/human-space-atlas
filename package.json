@@ -12,6 +12,7 @@
     "typecheck": "tsc -b",
     "perf:catalog": "node scripts/benchmark-orbit.mjs",
     "perf:browser": "node scripts/benchmark-browser.mjs",
+    "perf:browser:headed": "node scripts/benchmark-browser-headed.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "check:server": "node --check server/index.mjs && node --check scripts/dev.mjs"

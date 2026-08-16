@@ -5,6 +5,7 @@ import { shouldApplyPositionResult } from '../src/workers/workerState'
 import { generateSyntheticCatalog } from '../src/lib/syntheticCatalog'
 import { percentile, summarizeDurations } from '../src/lib/performanceStats'
 import { AutoRenderController, resolveRenderLimit, selectRenderSet } from '../src/lib/renderSet'
+import { LatestOnlyQueue } from '../src/workers/latestOnlyQueue'
 
 const record = (id: number, type: string, name: string): OmmRecord => ({
   OBJECT_NAME: name, EPOCH: '2026-08-16T00:00:00.000Z', NORAD_CAT_ID: id,
@@ -51,6 +52,19 @@ describe('benchmark helpers', () => {
 })
 
 describe('active render set policy', () => {
+  it('keeps one active request and only the newest pending request', () => {
+    const queue = new LatestOnlyQueue<string>()
+    expect(queue.submit('A')).toBe('A')
+    expect(queue.submit('B')).toBeNull()
+    expect(queue.submit('C')).toBeNull()
+    expect(queue.submit('D')).toBeNull()
+    expect(queue.activeCount).toBe(1)
+    expect(queue.pendingCount).toBe(1)
+    expect(queue.complete()).toBe('D')
+    expect(queue.complete()).toBeNull()
+    expect(queue.activeCount).toBe(0)
+  })
+
   it('filters before the limit and includes selected objects outside the normal sample', () => {
     const entries = normalizeCatalog(Array.from({ length: 10 }, (_, index) => record(index + 1, 'PAYLOAD', `Object ${index + 1}`))).entries
     expect(selectRenderSet(entries, 3, null)).toHaveLength(3)
