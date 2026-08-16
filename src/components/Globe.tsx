@@ -24,11 +24,12 @@ interface GlobeProps {
   homeRequest?: number
   mapStyle?: string
   onMapStyleError?: () => void
+  onMapStyleLoading?: (loading: boolean) => void
 }
 
 const POINT_SIZE = 5
 
-export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', onMapStyleError }: GlobeProps) {
+export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', onMapStyleError, onMapStyleLoading }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
@@ -37,6 +38,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   const requestRef = useRef(0)
   const latestAppliedRequestRef = useRef(0)
   const defaultImageryRef = useRef<unknown>(null)
+  const imageryRequestRef = useRef(0)
 
   const satrecs = useMemo(() => {
     const map = new Map<number, ReturnType<typeof createSatrec>>()
@@ -106,25 +108,36 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer) return
-    const current = viewer.imageryLayers.get(0)
-    if (!current) return
+    const requestId = imageryRequestRef.current + 1
+    imageryRequestRef.current = requestId
     const definition = discoverMapStyles().find((style) => style.id === mapStyle) ?? discoverMapStyles()[0]
+    const current = viewer.imageryLayers.get(0)
+    if (!current) { onMapStyleLoading?.(false); return }
+    let cancelled = false
     if (definition.isDefault) {
       if (defaultImageryRef.current && current.imageryProvider !== defaultImageryRef.current) {
         viewer.imageryLayers.removeAll(false)
         viewer.imageryLayers.addImageryProvider(defaultImageryRef.current as Parameters<typeof viewer.imageryLayers.addImageryProvider>[0])
       }
-      return
+      onMapStyleLoading?.(false)
+      return () => { cancelled = true }
     }
-    let cancelled = false
-    Promise.resolve(definition.create?.()).then((provider) => {
-      if (cancelled || !provider) return
-      viewer.imageryLayers.removeAll(false)
-      if (Array.isArray(provider)) provider.forEach((item) => viewer.imageryLayers.addImageryProvider(item))
-      else viewer.imageryLayers.addImageryProvider(provider)
-    }).catch(() => { if (!cancelled) onMapStyleError?.() })
-    return () => { cancelled = true }
-  }, [mapStyle, onMapStyleError])
+    onMapStyleLoading?.(true)
+    const startedAt = performance.now()
+    let commitTimer: number | null = null
+    Promise.resolve().then(() => definition.create?.()).then((provider) => {
+      if (cancelled || requestId !== imageryRequestRef.current || !provider) return
+      const commit = () => {
+        if (cancelled || requestId !== imageryRequestRef.current) return
+        viewer.imageryLayers.removeAll(false)
+        if (Array.isArray(provider)) provider.forEach((item) => viewer.imageryLayers.addImageryProvider(item))
+        else viewer.imageryLayers.addImageryProvider(provider)
+        onMapStyleLoading?.(false)
+      }
+      commitTimer = window.setTimeout(commit, Math.max(0, 160 - (performance.now() - startedAt)))
+    }).catch(() => { if (!cancelled && requestId === imageryRequestRef.current) { onMapStyleLoading?.(false); onMapStyleError?.() } })
+    return () => { cancelled = true; if (commitTimer !== null) window.clearTimeout(commitTimer) }
+  }, [mapStyle, onMapStyleError, onMapStyleLoading])
 
   useEffect(() => {
     const worker = workerRef.current

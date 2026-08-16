@@ -35,6 +35,7 @@ function App() {
   const [homeRequest, setHomeRequest] = useState(0)
   const mapStyles = useMemo(() => discoverMapStyles(), [])
   const [mapStyle, setMapStyle] = useState(() => { const saved = localStorage.getItem('human-space-atlas.map-style-v2'); return saved && mapStyles.some((style) => style.id === saved) ? saved : 'satellite' })
+  const [mapStyleLoading, setMapStyleLoading] = useState(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
@@ -44,6 +45,8 @@ function App() {
   const [autoLimit, setAutoLimit] = useState(5000)
   const autoControllerRef = useRef(new AutoRenderController())
   const onPerformance = useCallback((metric: typeof performanceMetric) => setPerformanceMetric(metric), [])
+  const onMapStyleError = useCallback(() => { setMapStyle('satellite'); setMapStyleLoading(false) }, [])
+  const onMapStyleLoading = useCallback((loading: boolean) => setMapStyleLoading(loading), [])
 
   useEffect(() => {
     const closeOverlays = (event: KeyboardEvent) => {
@@ -140,6 +143,11 @@ function App() {
     if (speed === 0) setSpeed(1)
   }
 
+  function selectMapStyle(styleId: string) {
+    setMapStyleLoading(styleId !== 'satellite')
+    setMapStyle(styleId)
+  }
+
   return (
     <main className={`app-shell ${settingsOpen ? 'settings-open' : ''}`}>
       <Globe
@@ -150,7 +158,8 @@ function App() {
         onPerformance={onPerformance}
         homeRequest={homeRequest}
         mapStyle={mapStyle}
-        onMapStyleError={() => setMapStyle('satellite')}
+        onMapStyleError={onMapStyleError}
+        onMapStyleLoading={onMapStyleLoading}
       />
       {new URLSearchParams(window.location.search).get('debug') === 'perf' && <PerformanceOverlay loaded={objects.length} visible={visibleObjects.length} {...performanceMetric} />}
 
@@ -192,7 +201,7 @@ function App() {
 
       <div className="catalog-counts glass"><span className="live-dot" /> {filteredEntries.length.toLocaleString('en-US')} / {objects.length.toLocaleString('en-US')} objects <small>displayed</small></div>
 
-      {settingsOpen && <section className="settings-popover glass"><div className="popover-heading"><span className="panel-title">Settings</span><button className="close-button" onClick={() => setSettingsOpen(false)}>×</button></div><span className="panel-title section-label">View</span><button className="home-setting" onClick={() => setHomeRequest((request) => request + 1)} aria-label="Home"><span>⌂</span><div><strong>Home</strong><small>Return to Earth overview</small></div></button><span className="panel-title section-label">Map style</span><div className="map-style-list">{mapStyles.map((style) => <button key={style.id} className={mapStyle === style.id ? 'active' : ''} onClick={() => setMapStyle(style.id)} title={style.tooltip}><span className={`map-preview ${style.id === 'satellite' ? 'satellite-preview' : style.id === 'openstreetmap' ? 'map-preview-osm' : 'map-preview-generic'}`} style={style.iconUrl ? { backgroundImage: `url(${style.iconUrl})` } : undefined} /><div><strong>{style.name}</strong><small>{style.isDefault ? 'DEFAULT' : mapStyle === style.id ? 'SELECTED' : style.name === 'Natural Earth II' ? 'Atlas map' : style.name === 'OpenStreetMap' ? 'Street map' : 'Imagery'}</small></div>{mapStyle === style.id && <span className="map-check">✓</span>}</button>)}</div><span className="panel-title section-label">Rendering density</span><div className="density-list">{(['AUTO', '1000', '2500', '5000', '10000', '25000', 'MAXIMUM'] as RenderMode[]).map((mode) => <button key={mode} className={renderMode === mode ? 'active' : ''} onClick={() => setRenderMode(mode)}><span>{mode === 'AUTO' ? 'Automatic' : mode === 'MAXIMUM' ? 'Maximum' : Number(mode).toLocaleString('en-US')}</span><small>{mode === 'AUTO' ? 'Recommended' : mode === '1000' ? 'Low' : mode === '5000' ? 'Balanced' : mode === '10000' ? 'High' : mode === '25000' ? 'Ultra' : ''}</small></button>)}</div><label className="small-control">Custom · {customLimit.toLocaleString('en-US')} objects<input type="range" min="1000" max="50000" step="500" value={customLimit} onChange={(event) => { setCustomLimit(Number(event.target.value)); setRenderMode('CUSTOM') }} /></label><p className="microcopy">Catalog: {objects.length.toLocaleString('en-US')} · Displayed: {visibleObjects.length.toLocaleString('en-US')}<br />The complete catalog remains searchable.</p>{renderLimit >= 25000 && <p className="warning-copy">High object densities may reduce performance.</p>}</section>}
+      {settingsOpen && <section className="settings-popover glass"><div className="popover-heading"><span className="panel-title">Settings</span><button className="close-button" onClick={() => setSettingsOpen(false)}>×</button></div><span className="panel-title section-label">View</span><button className="home-setting" onClick={() => setHomeRequest((request) => request + 1)} aria-label="Home"><span>⌂</span><div><strong>Home</strong><small>Return to Earth overview</small></div></button><span className="panel-title section-label">Map style {mapStyleLoading && <span className="map-loading"><span /> Loading map</span>}</span><div className="map-style-list">{mapStyles.map((style) => <button key={style.id} className={mapStyle === style.id ? 'active' : ''} onClick={() => selectMapStyle(style.id)} title={style.tooltip}><span className={`map-preview ${style.id === 'satellite' ? 'satellite-preview' : style.id === 'openstreetmap' ? 'map-preview-osm' : 'map-preview-generic'}`} style={style.iconUrl ? { backgroundImage: `url(${style.iconUrl})` } : undefined} /><div><strong>{style.name}</strong><small>{style.isDefault ? 'DEFAULT' : mapStyle === style.id ? 'SELECTED' : style.name === 'Natural Earth II' ? 'Atlas map' : style.name === 'OpenStreetMap' ? 'Street map' : 'Imagery'}</small></div>{mapStyle === style.id && <span className="map-check">✓</span>}</button>)}</div><span className="panel-title section-label">Rendering density</span><div className="density-list">{(['AUTO', '1000', '2500', '5000', '10000', '25000', 'MAXIMUM'] as RenderMode[]).map((mode) => <button key={mode} className={renderMode === mode ? 'active' : ''} onClick={() => setRenderMode(mode)}><span>{mode === 'AUTO' ? 'Automatic' : mode === 'MAXIMUM' ? 'Maximum' : Number(mode).toLocaleString('en-US')}</span><small>{mode === 'AUTO' ? 'Recommended' : mode === '1000' ? 'Low' : mode === '5000' ? 'Balanced' : mode === '10000' ? 'High' : mode === '25000' ? 'Ultra' : ''}</small></button>)}</div><label className="small-control">Custom · {customLimit.toLocaleString('en-US')} objects<input type="range" min="1000" max="50000" step="500" value={customLimit} onChange={(event) => { setCustomLimit(Number(event.target.value)); setRenderMode('CUSTOM') }} /></label><p className="microcopy">Catalog: {objects.length.toLocaleString('en-US')} · Displayed: {visibleObjects.length.toLocaleString('en-US')}<br />The complete catalog remains searchable.</p>{renderLimit >= 25000 && <p className="warning-copy">High object densities may reduce performance.</p>}</section>}
 
       <section className="time-controls glass">
         <div>

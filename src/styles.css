@@ -34,6 +34,9 @@ kbd { position: absolute; top: 11px; right: 12px; color: #718096; font-size: 10p
 .explorer-rail { position: absolute; z-index: var(--z-panels); top: calc(var(--hud-edge) + var(--topbar-height) + var(--hud-gap)); left: var(--hud-edge); width: 48px; height: 48px; border-radius: 13px; color: #b9d5e8; font-size: 18px; }
 .collapse-button { display: block; margin-left: auto; border: 0; color: #9cb1c9; background: transparent; font-size: 20px; }
 .panel-title { display: block; margin: 0 0 10px; color: #8fb9d7; font-size: 10px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+.map-loading { display: inline-flex; align-items: center; gap: 5px; margin-left: 7px; color: #8ddcff; font-size: 9px; letter-spacing: .05em; text-transform: none; }
+.map-loading span { width: 8px; height: 8px; border: 1px solid rgba(141,220,255,.35); border-top-color: #8ddcff; border-radius: 50%; animation: map-spin .8s linear infinite; }
+@keyframes map-spin { to { transform: rotate(360deg); } }
 .section-label { margin-top: 22px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.07); }
 .nav-list { display: grid; gap: 4px; }
 .nav-list button { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid transparent; border-radius: 9px; text-align: left; color: #a9b8cc; background: transparent; font-size: 12px; }
