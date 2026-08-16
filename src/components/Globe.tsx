@@ -3,11 +3,18 @@ import {
   Cartesian3,
   Cartesian2,
   Color,
+  Ellipsoid,
+  EllipsoidGeometry,
+  GeometryInstance,
   ImageryLayer,
   Ion,
+  Material,
+  MaterialAppearance,
   PointPrimitiveCollection,
+  Primitive,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
+  VertexFormat,
   Viewer,
 } from 'cesium'
 import { discoverMapStyles } from '../lib/mapStyles'
@@ -60,6 +67,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
+  const atmospherePrimitiveRef = useRef<Primitive | null>(null)
   const workerRef = useRef<Worker | null>(null)
   const generationRef = useRef(0)
   const requestRef = useRef(0)
@@ -105,15 +113,45 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     viewer.scene.globe.showGroundAtmosphere = true
     viewer.scene.globe.dynamicAtmosphereLighting = true
     viewer.scene.globe.dynamicAtmosphereLightingFromSun = true
-    viewer.scene.globe.atmosphereBrightnessShift = -0.08
-    viewer.scene.globe.atmosphereSaturationShift = 0.08
+    viewer.scene.globe.atmosphereLightIntensity = 18
+    viewer.scene.globe.atmosphereBrightnessShift = 0.02
+    viewer.scene.globe.atmosphereSaturationShift = 0.18
     const skyAtmosphere = viewer.scene.skyAtmosphere
     if (skyAtmosphere) {
       skyAtmosphere.show = true
-      skyAtmosphere.brightnessShift = -0.06
-      skyAtmosphere.saturationShift = 0.08
+      skyAtmosphere.perFragmentAtmosphere = true
+      skyAtmosphere.atmosphereLightIntensity = 72
+      skyAtmosphere.brightnessShift = 0.02
+      skyAtmosphere.saturationShift = 0.16
     }
     viewer.scene.backgroundColor = Color.fromCssColorString('#02040b')
+
+    const atmosphereRadii = Cartesian3.multiplyByScalar(Ellipsoid.WGS84.radii, 1.014, new Cartesian3())
+    const atmospherePrimitive = viewer.scene.primitives.add(new Primitive({
+      geometryInstances: new GeometryInstance({
+        geometry: new EllipsoidGeometry({
+          radii: atmosphereRadii,
+          stackPartitions: 48,
+          slicePartitions: 64,
+          vertexFormat: VertexFormat.POSITION_AND_NORMAL,
+        }),
+      }),
+      appearance: new MaterialAppearance({
+        material: Material.fromType('RimLighting', {
+          color: Color.WHITE.withAlpha(0),
+          rimColor: Color.fromCssColorString('#56bfff').withAlpha(0.26),
+          width: 0.42,
+        }),
+        faceForward: true,
+        translucent: true,
+        closed: false,
+        materialSupport: MaterialAppearance.MaterialSupport.BASIC,
+      }),
+      allowPicking: false,
+      asynchronous: false,
+      cull: false,
+    }))
+    atmospherePrimitiveRef.current = atmospherePrimitive
 
     const points = viewer.scene.primitives.add(new PointPrimitiveCollection())
     pointsRef.current = points
@@ -144,6 +182,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     return () => {
       handler.destroy()
       pointsRef.current = null
+      atmospherePrimitiveRef.current = null
       worker.postMessage({ type: 'DISPOSE' } satisfies WorkerCommand)
       workerRef.current = null
       explorationRef.current?.destroy()
