@@ -12,6 +12,7 @@ import { combineAngularInput, resolveKeyboardAngularInput, resolveMouseAngularIn
 import { applyCameraOrbit, applyCameraZoom, clampCameraPitch, DEFAULT_CAMERA_DISTANCE_METERS, MAX_CAMERA_DISTANCE_METERS, MIN_CAMERA_DISTANCE_METERS } from '../src/exploration/ShipCameraRig'
 import { AUTOPILOT_STANDOFF_METERS, computeAutopilotGuidance } from '../src/exploration/autopilot'
 import { normalizeEarthEvents } from '../src/lib/earthEvents'
+import { cloudAlphaFromFraction, cloudFractionFromRgb } from '../src/lib/earthLayers'
 
 const record = (id: number, type: string, name: string): OmmRecord => ({
   OBJECT_NAME: name, EPOCH: '2026-08-16T00:00:00.000Z', NORAD_CAT_ID: id,
@@ -239,5 +240,19 @@ describe('NASA Earth Events normalization', () => {
     expect(events[0].geometry).toEqual({ type: 'Polygon', coordinates: [[-1, 1], [1, 1], [1, -1], [-1, 1]], date: null })
     expect(events[0].magnitudeValue).toBeNull()
     expect(events[0].magnitudeUnit).toBeNull()
+  })
+})
+
+describe('NASA GIBS cloud palette', () => {
+  it('decodes the published cloud-fraction RGB buckets', () => {
+    expect(cloudFractionFromRgb(102, 0, 119)).toBe(0)
+    expect(cloudFractionFromRgb(255, 0, 5)).toBe(100)
+    expect(cloudFractionFromRgb(192, 192, 192)).toBeNull()
+  })
+
+  it('keeps low coverage transparent and renders higher coverage white', () => {
+    expect(cloudAlphaFromFraction(10)).toBe(0)
+    expect(cloudAlphaFromFraction(100)).toBeGreaterThan(cloudAlphaFromFraction(30))
+    expect(cloudAlphaFromFraction(100)).toBeLessThanOrEqual(255)
   })
 })
