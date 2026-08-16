@@ -62,6 +62,8 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       shouldAnimate: true,
     })
 
+    viewer.camera.setView({ destination: Cartesian3.fromDegrees(-18, 18, 18_000_000) })
+
     viewer.scene.globe.enableLighting = true
     viewer.scene.backgroundColor = Color.fromCssColorString('#02040b')
 

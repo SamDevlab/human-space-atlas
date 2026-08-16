@@ -10,8 +10,8 @@ import { AutoRenderController, resolveRenderLimit, selectRenderSet, type RenderM
 import type { CatalogGroup, OmmRecord } from './lib/types'
 
 const GROUPS: Array<{ value: CatalogGroup; label: string }> = [
-  { value: 'stations', label: 'Estações' },
-  { value: 'active', label: 'Ativos' },
+  { value: 'stations', label: 'Stations' },
+  { value: 'active', label: 'Active Satellites' },
   { value: 'starlink', label: 'Starlink' },
   { value: 'gps-ops', label: 'GPS' },
 ]
@@ -28,6 +28,8 @@ function App() {
   const [speed, setSpeed] = useState(1)
   const [objectKind, setObjectKind] = useState('ALL')
   const [objectQuery, setObjectQuery] = useState('')
+  const [explorerOpen, setExplorerOpen] = useState(true)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
   const [performanceMetric, setPerformanceMetric] = useState({ workerMs: 0, applyMs: 0, transferBytes: 0, pending: 0 })
@@ -46,18 +48,18 @@ function App() {
   useEffect(() => {
     const controller = new AbortController()
     setError(null)
-    setStatus('Carregando catálogo…')
+    setStatus('Loading orbital catalog…')
     setSelectedId(null)
 
     if (benchmarkCount > 0) {
       try {
         const synthetic = generateSyntheticCatalog(benchmarkCount)
         setObjects(synthetic)
-        setStatus(`${synthetic.length.toLocaleString('pt-BR')} objetos · benchmark sintético READY`)
+        setStatus(`${synthetic.length.toLocaleString('en-US')} objects · synthetic benchmark READY`)
       } catch (err) {
         setObjects([])
         setError(err instanceof Error ? err.message : 'Benchmark inválido')
-        setStatus('Benchmark indisponível')
+        setStatus('Benchmark unavailable')
       }
       return () => controller.abort()
     }
@@ -65,13 +67,13 @@ function App() {
     fetchCatalog(group, controller.signal)
       .then((payload) => {
         setObjects(payload.objects)
-        setStatus(`${payload.objects.length.toLocaleString('pt-BR')} objetos · ${payload.cache === 'hit' ? 'cache' : 'fonte atualizada'}`)
+        setStatus(`${payload.objects.length.toLocaleString('en-US')} objects · ${payload.cache === 'hit' ? 'cached' : 'live source'}`)
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return
         setObjects([])
         setError(err instanceof Error ? err.message : 'Erro inesperado')
-        setStatus('Catálogo indisponível')
+        setStatus('Catalog unavailable')
       })
 
     return () => controller.abort()
@@ -128,95 +130,81 @@ function App() {
       {new URLSearchParams(window.location.search).get('debug') === 'perf' && <PerformanceOverlay loaded={objects.length} visible={visibleObjects.length} {...performanceMetric} />}
 
       <header className="topbar glass">
-        <div>
-          <p className="eyebrow">HUMAN SPACE ATLAS</p>
-          <h1>Presença humana no espaço, em uma só visão.</h1>
+        <button className="brand" onClick={() => { setSelectedId(null); setObjectQuery('') }} aria-label="Human Space Atlas home"><span className="brand-mark">◉</span><span>HUMAN SPACE ATLAS</span></button>
+        <div className="search-wrap"><span className="search-icon">⌕</span><input aria-label="Search satellites" placeholder="Search satellites or NORAD ID…" value={objectQuery} onChange={(event) => setObjectQuery(event.target.value)} /><kbd>⌘ K</kbd>
+          {objectQuery && <div className="search-dropdown">{filteredEntries.slice(0, 5).map((entry) => <button key={entry.id} onClick={() => setSelectedId(entry.noradNumericId)}><strong>{entry.name}</strong><span>NORAD {entry.noradId} · {entry.objectType}</span></button>)}</div>}
         </div>
-        <div className="segmented">
-          {['ALL', 'PAYLOAD', 'ROCKET BODY', 'DEBRIS'].map((kind) => (
-            <button key={kind} className={objectKind === kind ? 'active' : ''} onClick={() => setObjectKind(kind)}>
-              {kind === 'ALL' ? 'Todos' : kind}
-            </button>
-          ))}
-        </div>
-        <input aria-label="Buscar objeto" placeholder="Buscar nome ou NORAD" value={objectQuery} onChange={(event) => setObjectQuery(event.target.value)} />
         <div className="live-status">
           <span className="live-dot" />
-          <span>{status}</span>
+          <div><strong>{objects.length ? 'LIVE' : 'CONNECTING'}</strong><span>{objects.length.toLocaleString('en-US')} objects</span></div>
         </div>
+        <button className="icon-button" onClick={() => setSettingsOpen((open) => !open)} aria-label="Open settings" title="Settings">⚙</button>
       </header>
 
-      <aside className="filters glass">
-        <span className="panel-title">Órbita terrestre</span>
-        <div className="segmented">
+      <aside className={`filters glass ${explorerOpen ? '' : 'collapsed'}`}>
+        <button className="collapse-button" onClick={() => setExplorerOpen((open) => !open)} aria-label={explorerOpen ? 'Collapse explorer' : 'Open explorer'}>{explorerOpen ? '‹' : '☰'}</button>
+        {explorerOpen && <>
+        <span className="panel-title">Explore</span>
+        <div className="nav-list">
           {GROUPS.map((item) => (
             <button
               key={item.value}
               className={group === item.value ? 'active' : ''}
               onClick={() => setGroup(item.value)}
             >
-              {item.label}
+              <span className="nav-icon">{item.value === 'stations' ? '◉' : item.value === 'active' ? '◌' : item.value === 'starlink' ? '✦' : '◇'}</span>{item.label}
             </button>
           ))}
         </div>
-        <p className="microcopy">
-          Dados orbitais via OMM/JSON. A posição é propagada localmente com SGP4.
-        </p>
-        <span className="panel-title">Performance de renderização</span>
-        <div className="segmented render-modes">
-          {(['AUTO', '1000', '2500', '5000', '10000', '25000', 'MAXIMUM'] as RenderMode[]).map((mode) => <button key={mode} className={renderMode === mode ? 'active' : ''} onClick={() => setRenderMode(mode)}>{mode === 'AUTO' ? 'Automático' : mode === 'MAXIMUM' ? 'Máximo' : Number(mode).toLocaleString('pt-BR')}</button>)}
+        <span className="panel-title section-label">Object Type</span>
+        <div className="nav-list type-list">
+          {(['ALL', 'PAYLOAD', 'ROCKET BODY', 'DEBRIS']).map((kind) => <button key={kind} className={objectKind === kind ? 'active' : ''} onClick={() => setObjectKind(kind)}><span className="nav-icon">{kind === 'ALL' ? '●' : '◇'}</span>{kind === 'ALL' ? 'All Objects' : kind === 'ROCKET BODY' ? 'Rocket Body' : kind[0] + kind.slice(1).toLowerCase()}</button>)}
         </div>
-        <label className="small-control">Personalizado
-          <input type="number" min="1000" max="50000" step="500" value={customLimit} onChange={(event) => { setCustomLimit(Math.max(1000, Math.min(50000, Number(event.target.value) || 1000))); setRenderMode('CUSTOM') }} />
-        </label>
-        <p className="microcopy">{renderMode === 'AUTO' ? `Auto · ${autoLimit.toLocaleString('pt-BR')} objetos` : `Renderizando até ${renderLimit.toLocaleString('pt-BR')} objetos`}. O catálogo completo continua pesquisável.</p>
-        {renderLimit >= 25000 && <p className="warning-copy">Valores altos podem reduzir o desempenho em alguns dispositivos.</p>}
-        {error && <div className="error-box">{error}</div>}
+        <p className="microcopy">OMM / JSON · local SGP4 propagation</p>
+        {error && <div className="error-box">Unable to update orbital catalog<br /><small>Using cached data</small></div>}
+        </>}
       </aside>
 
-      <div className="catalog-counts glass">Catálogo: {objects.length.toLocaleString('pt-BR')} · Filtrado: {filteredEntries.length.toLocaleString('pt-BR')} · Renderizado: {visibleObjects.length.toLocaleString('pt-BR')}{filteredEntries.length > visibleObjects.length && ` · Exibindo ${visibleObjects.length.toLocaleString('pt-BR')} de ${filteredEntries.length.toLocaleString('pt-BR')}`}</div>
+      <div className="catalog-counts glass"><span className="live-dot" /> {filteredEntries.length.toLocaleString('en-US')} / {objects.length.toLocaleString('en-US')} objects <small>displayed</small></div>
+
+      {settingsOpen && <section className="settings-popover glass"><div className="popover-heading"><span className="panel-title">Settings</span><button className="close-button" onClick={() => setSettingsOpen(false)}>×</button></div><span className="panel-title section-label">Rendering density</span><div className="density-list">{(['AUTO', '1000', '2500', '5000', '10000', '25000', 'MAXIMUM'] as RenderMode[]).map((mode) => <button key={mode} className={renderMode === mode ? 'active' : ''} onClick={() => setRenderMode(mode)}><span>{mode === 'AUTO' ? 'Automatic' : mode === 'MAXIMUM' ? 'Maximum' : Number(mode).toLocaleString('en-US')}</span><small>{mode === 'AUTO' ? 'Recommended' : mode === '1000' ? 'Low' : mode === '5000' ? 'Balanced' : mode === '10000' ? 'High' : mode === '25000' ? 'Ultra' : ''}</small></button>)}</div><label className="small-control">Custom · {customLimit.toLocaleString('en-US')} objects<input type="range" min="1000" max="50000" step="500" value={customLimit} onChange={(event) => { setCustomLimit(Number(event.target.value)); setRenderMode('CUSTOM') }} /></label><p className="microcopy">Catalog: {objects.length.toLocaleString('en-US')} · Displayed: {visibleObjects.length.toLocaleString('en-US')}<br />The complete catalog remains searchable.</p>{renderLimit >= 25000 && <p className="warning-copy">High object densities may reduce performance.</p>}</section>}
 
       <section className="time-controls glass">
         <div>
-          <span className="panel-title">Tempo simulado</span>
-          <strong>{simulatedAt.toLocaleString('pt-BR', { timeZone: 'UTC' })} UTC</strong>
+          <span className="panel-title">Simulated Time</span>
+          <strong>{simulatedAt.toLocaleString('en-GB', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' })} UTC</strong>
         </div>
         <div className="speed-row">
           {SPEEDS.map((value) => (
             <button key={value} className={speed === value ? 'active' : ''} onClick={() => setSpeed(value)}>
-              {value === 0 ? 'Pausa' : `${value}×`}
+              {value === 0 ? '❚❚' : `${value}×`}
             </button>
           ))}
-          <button onClick={jumpToNow}>Agora</button>
+          <button onClick={jumpToNow} title="Return to real time">NOW</button>
         </div>
       </section>
 
       <aside className="details glass">
         {selected ? (
           <>
-            <p className="eyebrow">OBJETO SELECIONADO</p>
+            <div className="inspector-heading"><p className="eyebrow">OBJECT INSPECTOR</p><button className="close-button" onClick={() => setSelectedId(null)}>×</button></div>
             <h2>{selected.OBJECT_NAME}</h2>
+            <div className="object-meta"><span className="live-dot" /> ACTIVE · {selected.OBJECT_TYPE} <span>NORAD {selected.NORAD_CAT_ID}</span></div>
             <dl>
-              <div><dt>NORAD</dt><dd>{selected.NORAD_CAT_ID}</dd></div>
-              <div><dt>Designador</dt><dd>{selected.OBJECT_ID ?? '—'}</dd></div>
-              <div><dt>Epoch</dt><dd>{selected.EPOCH}</dd></div>
-              <div><dt>Inclinação</dt><dd>{selected.INCLINATION.toFixed(2)}°</dd></div>
-              <div><dt>Altitude</dt><dd>{selectedState ? `${selectedState.altitudeKm.toFixed(0)} km` : '—'}</dd></div>
-              <div><dt>Velocidade</dt><dd>{selectedState ? `${selectedState.speedKmS.toFixed(2)} km/s` : '—'}</dd></div>
+              <div><dt>ALTITUDE</dt><dd>{selectedState ? `${selectedState.altitudeKm.toFixed(0)} km` : '—'}</dd></div><div><dt>SPEED</dt><dd>{selectedState ? `${selectedState.speedKmS.toFixed(2)} km/s` : '—'}</dd></div>
+              <div><dt>INCLINATION</dt><dd>{selected.INCLINATION.toFixed(2)}°</dd></div><div><dt>NORAD ID</dt><dd>{selected.NORAD_CAT_ID}</dd></div>
+              <div><dt>OBJECT ID</dt><dd>{selected.OBJECT_ID ?? '—'}</dd></div><div><dt>EPOCH</dt><dd>{selected.EPOCH.slice(0, 10)}</dd></div>
             </dl>
-            <button className="clear-button" onClick={() => setSelectedId(null)}>Limpar seleção</button>
+            <button className="clear-button" onClick={() => setSelectedId(null)}>Clear selection</button>
           </>
         ) : (
           <>
-            <p className="eyebrow">EXPLORAR</p>
-            <h2>Selecione um ponto no globo</h2>
-            <p>O MVP mostra estações, ativos, Starlink e GPS. Deep-space já tem endpoint preparado no backend.</p>
-            {objectQuery && <div className="search-results"><p className="microcopy">Resultados no catálogo completo:</p>{filteredEntries.slice(0, 5).map((entry) => <button key={entry.id} onClick={() => setSelectedId(entry.noradNumericId)}>{entry.name} · NORAD {entry.noradId}</button>)}</div>}
+            <div className="empty-inspector"><span>✦</span><p>Click an object to inspect</p><small>Explore Earth's orbital environment</small></div>
           </>
         )}
       </aside>
 
-      <footer className="source-note">CelesTrak → OMM/JSON → SGP4 → CesiumJS</footer>
+      <footer className="source-note">CelesTrak · OMM / JSON · SGP4 · CesiumJS</footer>
     </main>
   )
 }
