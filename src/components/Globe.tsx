@@ -32,11 +32,15 @@ interface GlobeProps {
   targetName?: string | null
   onExplorationHud?: (snapshot: ExplorationHudSnapshot) => void
   onExitExplore?: () => void
+  onOpenExploreNav?: () => void
+  onExploreActivity?: () => void
+  explorationSteeringSensitivity?: number
+  explorationCameraSensitivity?: number
 }
 
 const POINT_SIZE = 5
 
-export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', onMapStyleError, onMapStyleLoading, explorationActive = false, targetPosition = null, targetName = null, onExplorationHud, onExitExplore }: GlobeProps) {
+export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', onMapStyleError, onMapStyleLoading, explorationActive = false, targetPosition = null, targetName = null, onExplorationHud, onExitExplore, onOpenExploreNav, onExploreActivity, explorationSteeringSensitivity = 1, explorationCameraSensitivity = 1 }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
@@ -86,7 +90,12 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     const points = viewer.scene.primitives.add(new PointPrimitiveCollection())
     pointsRef.current = points
     viewerRef.current = viewer
-    explorationRef.current = new ExplorationController(viewer, { onHudUpdate: (snapshot) => onExplorationHud?.(snapshot), onExit: () => onExitExplore?.() })
+    explorationRef.current = new ExplorationController(viewer, {
+      onHudUpdate: (snapshot) => onExplorationHud?.(snapshot),
+      onExit: () => onExitExplore?.(),
+      onOpenNavigation: () => onOpenExploreNav?.(),
+      onControlsActivity: () => onExploreActivity?.(),
+    })
 
     const worker = new Worker(new URL('../workers/orbit.worker.ts', import.meta.url), { type: 'module' })
     workerRef.current = worker
@@ -109,7 +118,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       viewerRef.current = null
       viewer.destroy()
     }
-  }, [onSelect, onExplorationHud, onExitExplore])
+  }, [onSelect, onExplorationHud, onExitExplore, onOpenExploreNav, onExploreActivity])
 
   useEffect(() => {
     const controller = explorationRef.current
@@ -119,6 +128,10 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   }, [explorationActive])
 
   useEffect(() => { explorationRef.current?.setTarget(targetPosition, targetName) }, [targetPosition, targetName])
+  useEffect(() => {
+    explorationRef.current?.setSteeringSensitivity(explorationSteeringSensitivity)
+    explorationRef.current?.setCameraSensitivity(explorationCameraSensitivity)
+  }, [explorationSteeringSensitivity, explorationCameraSensitivity])
 
   useEffect(() => {
     const viewer = viewerRef.current

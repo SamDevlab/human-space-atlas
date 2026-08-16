@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Cartesian3 } from 'cesium'
 import { Globe } from './components/Globe'
 import { ExplorationHud } from './components/ExplorationHud'
+import { ExploreNav } from './components/ExploreNav'
+import { ExploreSettings } from './components/ExploreSettings'
 import { PerformanceOverlay } from './components/PerformanceOverlay'
 import { fetchCatalog } from './lib/api'
 import { createSatrec, getOrbitState, toCesiumHeightMeters } from './lib/orbit'
@@ -40,7 +42,13 @@ function App() {
   const [mapStyle, setMapStyle] = useState(() => { const saved = localStorage.getItem('human-space-atlas.map-style-v2'); return saved && mapStyles.some((style) => style.id === saved) ? saved : 'satellite' })
   const [mapStyleLoading, setMapStyleLoading] = useState(false)
   const [explorationActive, setExplorationActive] = useState(false)
-  const [explorationHud, setExplorationHud] = useState<ExplorationHudSnapshot>({ altitudeKm: 0, speedKmS: 0, cameraMode: 'COCKPIT', flightAssist: true, targetName: null, targetDistanceKm: null })
+  const [exploreNavOpen, setExploreNavOpen] = useState(false)
+  const [exploreNavQuery, setExploreNavQuery] = useState('')
+  const [exploreSettingsOpen, setExploreSettingsOpen] = useState(false)
+  const [exploreSteeringSensitivity, setExploreSteeringSensitivity] = useState(() => Number(localStorage.getItem('human-space-atlas.explore-steering-sensitivity') ?? 1))
+  const [exploreCameraSensitivity, setExploreCameraSensitivity] = useState(() => Number(localStorage.getItem('human-space-atlas.explore-camera-sensitivity') ?? 1))
+  const [exploreControlsVisible, setExploreControlsVisible] = useState(() => localStorage.getItem('human-space-atlas.explore-controls-seen') !== '1')
+  const [explorationHud, setExplorationHud] = useState<ExplorationHudSnapshot>({ altitudeKm: 0, speedKmS: 0, throttle: 0, cameraMode: 'THIRD_PERSON', cameraDistanceMeters: 7500, cameraOrbiting: false, flightAssist: true, boostActive: false, lowAltitude: false, targetName: null, targetDistanceKm: null, targetIndicator: null })
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
@@ -53,12 +61,24 @@ function App() {
   const onMapStyleError = useCallback(() => { setMapStyle('satellite'); setMapStyleLoading(false) }, [])
   const onMapStyleLoading = useCallback((loading: boolean) => setMapStyleLoading(loading), [])
   const onExplorationHud = useCallback((snapshot: ExplorationHudSnapshot) => setExplorationHud(snapshot), [])
-  const onExitExplore = useCallback(() => setExplorationActive(false), [])
+  const onExitExplore = useCallback(() => { setExploreNavOpen(false); setExploreSettingsOpen(false); setExplorationActive(false) }, [])
+  const onOpenExploreNav = useCallback(() => { setExploreSettingsOpen(false); setExploreNavOpen(true) }, [])
+  const onOpenExploreSettings = useCallback(() => { setExploreNavOpen(false); setExploreSettingsOpen(true) }, [])
+  const onExploreActivity = useCallback(() => {
+    setExploreControlsVisible((visible) => {
+      if (visible) localStorage.setItem('human-space-atlas.explore-controls-seen', '1')
+      return false
+    })
+  }, [])
+  const dismissExploreControls = useCallback(() => {
+    localStorage.setItem('human-space-atlas.explore-controls-seen', '1')
+    setExploreControlsVisible(false)
+  }, [])
 
   useEffect(() => {
     const closeOverlays = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); searchInputRef.current?.focus(); setSettingsOpen(false); setSearchFocused(true) }
-      if (event.key === 'Escape') { setSettingsOpen(false); setSearchFocused(false) }
+      if (event.key === 'Escape') { setSettingsOpen(false); setSearchFocused(false); setExploreNavOpen(false); setExploreSettingsOpen(false) }
     }
     const closeOnOutside = (event: MouseEvent) => {
       const target = event.target as Element
@@ -73,6 +93,8 @@ function App() {
   useEffect(() => { localStorage.setItem('human-space-atlas.render-mode', renderMode) }, [renderMode])
   useEffect(() => { localStorage.setItem('human-space-atlas.render-limit', String(customLimit)) }, [customLimit])
   useEffect(() => { localStorage.setItem('human-space-atlas.map-style-v2', mapStyle) }, [mapStyle])
+  useEffect(() => { localStorage.setItem('human-space-atlas.explore-steering-sensitivity', String(exploreSteeringSensitivity)) }, [exploreSteeringSensitivity])
+  useEffect(() => { localStorage.setItem('human-space-atlas.explore-camera-sensitivity', String(exploreCameraSensitivity)) }, [exploreCameraSensitivity])
   useEffect(() => {
     if (renderMode === 'AUTO') setAutoLimit(autoControllerRef.current.update(performanceMetric, performance.now()))
   }, [performanceMetric, renderMode])
@@ -125,6 +147,7 @@ function App() {
 
   const catalogEntries = useMemo(() => normalizeCatalog(objects).entries, [objects])
   const filteredEntries = useMemo(() => filterCatalog(catalogEntries, objectKind, objectQuery), [catalogEntries, objectKind, objectQuery])
+  const exploreNavEntries = useMemo(() => filterCatalog(catalogEntries, 'ALL', exploreNavQuery).map((entry) => entry.omm), [catalogEntries, exploreNavQuery])
   const renderLimit = resolveRenderLimit(renderMode, filteredEntries.length, autoLimit, customLimit)
   const selectedEntry = selectedId === null ? null : catalogEntries.find((entry) => entry.noradNumericId === selectedId) ?? null
   const renderCandidates = useMemo(() => selectedEntry && !filteredEntries.some((entry) => entry.noradNumericId === selectedEntry.noradNumericId) ? [selectedEntry, ...filteredEntries] : filteredEntries, [filteredEntries, selectedEntry])
@@ -160,7 +183,14 @@ function App() {
   function enterExploration() {
     setSettingsOpen(false)
     setSearchFocused(false)
+    setExploreNavOpen(false)
+    setExploreSettingsOpen(false)
     setExplorationActive(true)
+  }
+
+  function selectExploreTarget(catalogId: number) {
+    setSelectedId(catalogId)
+    setExploreNavOpen(false)
   }
 
   return (
@@ -180,6 +210,10 @@ function App() {
         targetName={selected?.OBJECT_NAME ?? null}
         onExplorationHud={onExplorationHud}
         onExitExplore={onExitExplore}
+        onOpenExploreNav={onOpenExploreNav}
+        onExploreActivity={onExploreActivity}
+        explorationSteeringSensitivity={exploreSteeringSensitivity}
+        explorationCameraSensitivity={exploreCameraSensitivity}
       />
       {new URLSearchParams(window.location.search).get('debug') === 'perf' && <PerformanceOverlay loaded={objects.length} visible={visibleObjects.length} {...performanceMetric} />}
 
@@ -260,7 +294,9 @@ function App() {
       </aside>
 
       <footer className="source-note">CelesTrak · OMM / JSON · SGP4 · CesiumJS</footer>
-      {explorationActive && <ExplorationHud snapshot={explorationHud} onExit={onExitExplore} onToggleCamera={() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC' }))} />}
+      {explorationActive && <ExplorationHud snapshot={explorationHud} onExit={onExitExplore} onOpenNav={onOpenExploreNav} onOpenSettings={onOpenExploreSettings} controlsHelpVisible={exploreControlsVisible} onDismissHelp={dismissExploreControls} />}
+      {explorationActive && exploreNavOpen && <ExploreNav query={exploreNavQuery} entries={exploreNavEntries} onQueryChange={setExploreNavQuery} onSelect={selectExploreTarget} onClose={() => setExploreNavOpen(false)} />}
+      {explorationActive && exploreSettingsOpen && <ExploreSettings steeringSensitivity={exploreSteeringSensitivity} cameraSensitivity={exploreCameraSensitivity} onSteeringChange={setExploreSteeringSensitivity} onCameraChange={setExploreCameraSensitivity} onClose={() => setExploreSettingsOpen(false)} />}
     </main>
   )
 }

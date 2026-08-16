@@ -1,14 +1,14 @@
 import type { Cartesian3, Quaternion } from 'cesium'
 
-export type ExplorationCameraMode = 'COCKPIT' | 'CHASE'
+export type ExplorationCameraMode = 'THIRD_PERSON'
 
 export interface FlightInput {
-  forward: number
+  throttleDelta: number
   strafe: number
   vertical: number
   yawRate: number
   pitchRate: number
-  rollRate: number
+  rollInput: number
   boost: boolean
   brake: boolean
 }
@@ -20,13 +20,27 @@ export interface ShipState {
   throttle: number
   angularVelocity: Cartesian3
   flightAssist: boolean
+  boostActive: boolean
+}
+
+export interface TargetIndicatorSnapshot {
+  x: number
+  y: number
+  angle: number
+  edge: boolean
 }
 
 export interface ExplorationHudSnapshot {
   altitudeKm: number
   speedKmS: number
+  throttle: number
   cameraMode: ExplorationCameraMode
+  cameraDistanceMeters: number
+  cameraOrbiting: boolean
   flightAssist: boolean
+  boostActive: boolean
+  lowAltitude: boolean
   targetName: string | null
   targetDistanceKm: number | null
+  targetIndicator: TargetIndicatorSnapshot | null
 }

@@ -1,80 +1,133 @@
 import {
+  Cartesian2,
   Cartesian3,
   Cartographic,
-  Color,
   Ellipsoid,
   Matrix3,
-  PointPrimitiveCollection,
   Quaternion,
   Viewer,
 } from 'cesium'
-import { createShipState, integrateShip } from './flightModel'
-import type { ExplorationCameraMode, ExplorationHudSnapshot, FlightInput, ShipState } from './types'
+import { createShipState, formatDistanceKm, integrateShip, LOW_ALTITUDE_WARNING_METERS } from './flightModel'
+import { ShipCameraRig } from './ShipCameraRig'
+import { ShipVisual } from './ShipVisual'
+import type { ExplorationCameraMode, ExplorationHudSnapshot, FlightInput, ShipState, TargetIndicatorSnapshot } from './types'
 
 interface ControllerOptions {
   onHudUpdate: (snapshot: ExplorationHudSnapshot) => void
   onExit: () => void
+  onOpenNavigation: () => void
+  onControlsActivity: () => void
 }
 
 const DEFAULT_SPAWN = Cartesian3.fromDegrees(-18, 18, 800_000)
 const SPAWN_OFFSET = 50_000
-const CHASE_DISTANCE = 450_000
-const CHASE_HEIGHT = 130_000
+const CAMERA_MODE: ExplorationCameraMode = 'THIRD_PERSON'
 
 export class ExplorationController {
   private readonly viewer: Viewer
   private readonly options: ControllerOptions
   private readonly canvas: HTMLCanvasElement
-  private readonly points: PointPrimitiveCollection
-  private readonly shipPoint
+  private readonly cameraRig: ShipCameraRig
+  private readonly shipVisual: ShipVisual
   private state: ShipState | null = null
   private targetPosition: Cartesian3 | null = null
   private targetName: string | null = null
-  private cameraMode: ExplorationCameraMode = 'COCKPIT'
   private active = false
   private frameHandle = 0
   private lastFrame = 0
   private lastHud = 0
   private readonly keys = new Set<string>()
   private mouseCaptured = false
+  private cameraOrbiting = false
   private mouseX = 0
   private mouseY = 0
-  private earthFacing = true
-  private savedCamera: { position: Cartesian3; direction: Cartesian3; up: Cartesian3 } | null = null
-  private savedInputs = true
+  private steeringSensitivity = 1
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     if (!this.active) return
-    if (['Space', 'Control', 'Shift', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyX'].includes(event.code)) event.preventDefault()
-    if (event.code === 'KeyC' && !event.repeat) { this.cameraMode = this.cameraMode === 'COCKPIT' ? 'CHASE' : 'COCKPIT'; return }
-    if (event.code === 'Escape') { this.releaseMouse(); return }
-    this.earthFacing = false
+    if (event.code === 'Escape') {
+      event.preventDefault()
+      if (this.mouseCaptured || document.pointerLockElement === this.canvas) this.releaseMouse()
+      else this.options.onExit()
+      return
+    }
+    if (event.code === 'KeyR' && !event.repeat) {
+      event.preventDefault()
+      this.cameraRig.recenter()
+      this.options.onControlsActivity()
+      return
+    }
+    if (event.code === 'KeyF' && !event.repeat) {
+      event.preventDefault()
+      this.releaseMouse()
+      this.options.onOpenNavigation()
+      return
+    }
+    if (['Space', 'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyX'].includes(event.code)) {
+      event.preventDefault()
+      this.options.onControlsActivity()
+    }
     this.keys.add(event.code)
   }
 
   private readonly onKeyUp = (event: KeyboardEvent) => { this.keys.delete(event.code) }
 
-  private readonly onMouseDown = () => {
+  private readonly onMouseDown = (event: MouseEvent) => {
     if (!this.active) return
-    this.mouseCaptured = true
-    this.canvas.requestPointerLock?.()
+    if (event.button === 1) {
+      event.preventDefault()
+      this.cameraOrbiting = true
+      this.cameraRig.beginOrbit()
+      this.options.onControlsActivity()
+      return
+    }
+    if (event.button === 0) {
+      this.mouseCaptured = true
+      this.canvas.requestPointerLock?.()
+      this.options.onControlsActivity()
+    }
   }
 
-  private readonly onMouseUp = () => { if (document.pointerLockElement !== this.canvas) this.mouseCaptured = false }
+  private readonly onMouseUp = (event: MouseEvent) => {
+    if (event.button === 1) {
+      this.cameraOrbiting = false
+      this.cameraRig.endOrbit()
+    }
+    if (event.button === 0 && document.pointerLockElement !== this.canvas) this.mouseCaptured = false
+  }
 
   private readonly onMouseMove = (event: MouseEvent) => {
-    if (!this.active || (!this.mouseCaptured && document.pointerLockElement !== this.canvas)) return
+    if (!this.active) return
+    if (this.cameraOrbiting) {
+      this.cameraRig.orbit(event.movementX, event.movementY)
+      return
+    }
+    if (!this.mouseCaptured && document.pointerLockElement !== this.canvas) return
     this.mouseX += event.movementX
     this.mouseY += event.movementY
-    if (event.movementX !== 0 || event.movementY !== 0) this.earthFacing = false
+  }
+
+  private readonly onWheel = (event: WheelEvent) => {
+    if (!this.active) return
+    event.preventDefault()
+    this.cameraRig.zoom(event.deltaY)
+    this.options.onControlsActivity()
+  }
+
+  private readonly onPointerLockChange = () => {
+    if (document.pointerLockElement !== this.canvas) this.mouseCaptured = false
+  }
+
+  private readonly onContextMenu = (event: MouseEvent) => {
+    if (this.active) event.preventDefault()
   }
 
   constructor(viewer: Viewer, options: ControllerOptions) {
     this.viewer = viewer
     this.options = options
     this.canvas = viewer.scene.canvas
-    this.points = viewer.scene.primitives.add(new PointPrimitiveCollection())
-    this.shipPoint = this.points.add({ position: DEFAULT_SPAWN, pixelSize: 12, color: Color.ORANGE, outlineColor: Color.WHITE, outlineWidth: 2, show: false })
+    this.cameraRig = new ShipCameraRig(viewer)
+    this.shipVisual = new ShipVisual(viewer)
   }
 
   isActive(): boolean { return this.active }
@@ -84,16 +137,11 @@ export class ExplorationController {
     this.active = true
     this.targetPosition = targetPosition?.clone() ?? null
     this.targetName = targetName
-    this.cameraMode = 'COCKPIT'
-    this.earthFacing = true
-    this.savedCamera = { position: this.viewer.camera.position.clone(), direction: this.viewer.camera.direction.clone(), up: this.viewer.camera.up.clone() }
-    this.savedInputs = this.viewer.scene.screenSpaceCameraController.enableInputs
-    this.viewer.scene.screenSpaceCameraController.enableInputs = false
     const spawn = this.spawnPosition(targetPosition)
-    const orientation = this.createEarthFacingOrientation(spawn)
-    this.state = createShipState(spawn, orientation)
-    this.shipPoint.show = false
+    this.state = createShipState(spawn, this.createTangentOrientation(spawn))
+    this.shipVisual.setVisible(true)
     this.bindInput()
+    this.cameraRig.enter(this.state.position, this.state.orientation)
     this.lastFrame = performance.now()
     this.lastHud = 0
     this.frameHandle = requestAnimationFrame(this.frame)
@@ -106,7 +154,8 @@ export class ExplorationController {
     cancelAnimationFrame(this.frameHandle)
     this.unbindInput()
     this.releaseMouse()
-    this.shipPoint.show = false
+    this.shipVisual.setVisible(false)
+    this.cameraRig.exit()
     if (this.savedCamera) this.viewer.camera.setView({ destination: this.savedCamera.position, orientation: { direction: this.savedCamera.direction, up: this.savedCamera.up } })
     this.viewer.scene.screenSpaceCameraController.enableInputs = this.savedInputs
     this.state = null
@@ -116,7 +165,7 @@ export class ExplorationController {
 
   destroy(): void {
     this.exit()
-    this.viewer.scene.primitives.remove(this.points)
+    this.shipVisual.destroy(this.viewer)
   }
 
   setTarget(position: Cartesian3 | null, name: string | null): void {
@@ -124,62 +173,44 @@ export class ExplorationController {
     this.targetName = name
   }
 
+  setSteeringSensitivity(value: number): void {
+    this.steeringSensitivity = Math.max(0.25, Math.min(2, value))
+  }
+
+  setCameraSensitivity(value: number): void {
+    this.cameraRig.orbitSensitivity = 0.004 * Math.max(0.25, Math.min(2, value))
+  }
+
+  private savedCamera: { position: Cartesian3; direction: Cartesian3; up: Cartesian3 } | null = null
+  private savedInputs = true
+
   private readonly frame = (now: number) => {
     if (!this.active || !this.state) return
     const dt = Math.max(0, Math.min((now - this.lastFrame) / 1000, 0.1))
     this.lastFrame = now
     const input = this.readInput(dt)
     this.state = integrateShip(this.state, input, dt)
-    this.shipPoint.position = this.state.position
-    this.shipPoint.show = this.cameraMode === 'CHASE'
-    this.updateCamera()
+    this.shipVisual.update(this.state.position, this.state.orientation, { throttle: this.state.throttle, boost: this.state.boostActive })
+    this.cameraRig.update(this.state.position, this.state.orientation, this.state.velocity, dt)
     this.emitHud(now)
     this.frameHandle = requestAnimationFrame(this.frame)
   }
 
   private readInput(dt: number): FlightInput {
-    const yawRate = this.mouseX * 0.002 / Math.max(dt, 0.016)
-    const pitchRate = -this.mouseY * 0.002 / Math.max(dt, 0.016)
+    const yawRate = Math.max(-1, Math.min(1, this.mouseX * 0.003 * this.steeringSensitivity / Math.max(dt, 0.016)))
+    const pitchRate = Math.max(-1, Math.min(1, -this.mouseY * 0.003 * this.steeringSensitivity / Math.max(dt, 0.016)))
     this.mouseX = 0
     this.mouseY = 0
     return {
-      forward: (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0),
+      throttleDelta: (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0),
       strafe: (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0),
       vertical: (this.keys.has('Space') ? 1 : 0) - (this.keys.has('ControlLeft') || this.keys.has('ControlRight') ? 1 : 0),
       yawRate,
       pitchRate,
-      rollRate: (this.keys.has('KeyE') ? 1 : 0) - (this.keys.has('KeyQ') ? 1 : 0),
+      rollInput: (this.keys.has('KeyE') ? 1 : 0) - (this.keys.has('KeyQ') ? 1 : 0),
       boost: this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'),
       brake: this.keys.has('KeyX'),
     }
-  }
-
-  private updateCamera(): void {
-    if (!this.state) return
-    if (this.earthFacing) {
-      const earthDirection = Cartesian3.normalize(Cartesian3.negate(this.state.position, new Cartesian3()), new Cartesian3())
-      const right = Cartesian3.normalize(Cartesian3.cross(earthDirection, Cartesian3.UNIT_Z, new Cartesian3()), new Cartesian3())
-      const earthUp = Cartesian3.normalize(Cartesian3.cross(right, earthDirection, new Cartesian3()), new Cartesian3())
-      if (this.cameraMode === 'COCKPIT') {
-        this.viewer.camera.setView({ destination: this.state.position, orientation: { direction: earthDirection, up: earthUp } })
-      } else {
-        const radial = Cartesian3.normalize(this.state.position, new Cartesian3())
-        const chasePosition = Cartesian3.add(this.state.position, Cartesian3.multiplyByScalar(radial, CHASE_DISTANCE, new Cartesian3()), new Cartesian3())
-        this.viewer.camera.setView({ destination: chasePosition, orientation: { direction: Cartesian3.normalize(Cartesian3.negate(chasePosition, new Cartesian3()), new Cartesian3()), up: earthUp } })
-      }
-      return
-    }
-    const rotation = Matrix3.fromQuaternion(this.state.orientation, new Matrix3())
-    const forward = Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_X, new Cartesian3())
-    const up = Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_Z, new Cartesian3())
-    if (this.cameraMode === 'COCKPIT') {
-      this.viewer.camera.setView({ destination: this.state.position, orientation: { direction: forward, up } })
-      return
-    }
-    const chasePosition = Cartesian3.add(this.state.position, Cartesian3.multiplyByScalar(forward, -CHASE_DISTANCE, new Cartesian3()), new Cartesian3())
-    Cartesian3.add(chasePosition, Cartesian3.multiplyByScalar(up, CHASE_HEIGHT, new Cartesian3()), chasePosition)
-    const direction = Cartesian3.normalize(Cartesian3.subtract(this.state.position, chasePosition, new Cartesian3()), new Cartesian3())
-    this.viewer.camera.setView({ destination: chasePosition, orientation: { direction, up } })
   }
 
   private emitHud(now: number): void {
@@ -187,7 +218,39 @@ export class ExplorationController {
     this.lastHud = now
     const cartographic = Cartographic.fromCartesian(this.state.position)
     const targetDistanceKm = this.targetPosition ? Cartesian3.distance(this.state.position, this.targetPosition) / 1000 : null
-    this.options.onHudUpdate({ altitudeKm: cartographic?.height ? Math.max(0, cartographic.height / 1000) : 0, speedKmS: Cartesian3.magnitude(this.state.velocity) / 1000, cameraMode: this.cameraMode, flightAssist: this.state.flightAssist, targetName: this.targetName, targetDistanceKm })
+    this.options.onHudUpdate({
+      altitudeKm: cartographic?.height ? Math.max(0, cartographic.height / 1000) : 0,
+      speedKmS: Cartesian3.magnitude(this.state.velocity) / 1000,
+      throttle: this.state.throttle,
+      cameraMode: CAMERA_MODE,
+      cameraDistanceMeters: this.cameraRig.getDistance(),
+      cameraOrbiting: this.cameraRig.isOrbiting(),
+      flightAssist: this.state.flightAssist,
+      boostActive: this.state.boostActive,
+      lowAltitude: Boolean(cartographic && cartographic.height < LOW_ALTITUDE_WARNING_METERS),
+      targetName: this.targetName,
+      targetDistanceKm,
+      targetIndicator: this.targetPosition ? this.getTargetIndicator(this.targetPosition) : null,
+    })
+  }
+
+  private getTargetIndicator(target: Cartesian3): TargetIndicatorSnapshot {
+    const width = this.canvas.clientWidth || this.canvas.width
+    const height = this.canvas.clientHeight || this.canvas.height
+    const centerX = width / 2
+    const centerY = height / 2
+    const projected = this.viewer.scene.cartesianToCanvasCoordinates(target, new Cartesian2())
+    const margin = 78
+    if (projected && projected.x >= margin && projected.x <= width - margin && projected.y >= margin && projected.y <= height - margin) {
+      return { x: projected.x, y: projected.y, angle: 0, edge: false }
+    }
+    let dx = (projected?.x ?? centerX + this.viewer.camera.right.x * 100) - centerX
+    let dy = (projected?.y ?? centerY - this.viewer.camera.up.y * 100) - centerY
+    if (Math.abs(dx) + Math.abs(dy) < 1) { dx = 1; dy = 0 }
+    const edgeRadiusX = Math.max(40, (width - margin * 2) / 2)
+    const edgeRadiusY = Math.max(40, (height - margin * 2) / 2)
+    const scale = Math.min(edgeRadiusX / Math.abs(dx), edgeRadiusY / Math.abs(dy || 0.0001))
+    return { x: centerX + dx * scale, y: centerY + dy * scale, angle: Math.atan2(dy, dx), edge: true }
   }
 
   private spawnPosition(target: Cartesian3 | null): Cartesian3 {
@@ -198,10 +261,10 @@ export class ExplorationController {
     return Cartesian3.multiplyByScalar(radial, safeRadius, new Cartesian3())
   }
 
-  private createEarthFacingOrientation(position: Cartesian3): Quaternion {
-    const forward = Cartesian3.normalize(Cartesian3.negate(position, new Cartesian3()), new Cartesian3())
-    const right = Cartesian3.normalize(Cartesian3.cross(forward, Cartesian3.UNIT_Z, new Cartesian3()), new Cartesian3())
-    const up = Cartesian3.normalize(Cartesian3.cross(right, forward, new Cartesian3()), new Cartesian3())
+  private createTangentOrientation(position: Cartesian3): Quaternion {
+    const up = Ellipsoid.WGS84.geodeticSurfaceNormal(position, new Cartesian3())
+    const forward = Cartesian3.normalize(Cartesian3.cross(Cartesian3.UNIT_Z, up, new Cartesian3()), new Cartesian3())
+    const right = Cartesian3.normalize(Cartesian3.cross(up, forward, new Cartesian3()), new Cartesian3())
     const basis = new Matrix3()
     Matrix3.setColumn(basis, 0, forward, basis)
     Matrix3.setColumn(basis, 1, right, basis)
@@ -210,20 +273,31 @@ export class ExplorationController {
   }
 
   private bindInput(): void {
+    this.savedCamera = { position: this.viewer.camera.position.clone(), direction: this.viewer.camera.direction.clone(), up: this.viewer.camera.up.clone() }
+    this.savedInputs = this.viewer.scene.screenSpaceCameraController.enableInputs
+    this.viewer.scene.screenSpaceCameraController.enableInputs = false
     window.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('keyup', this.onKeyUp)
-    this.canvas.addEventListener('mousedown', this.onMouseDown)
-    this.canvas.addEventListener('mouseup', this.onMouseUp)
     window.addEventListener('mousemove', this.onMouseMove)
+    window.addEventListener('mouseup', this.onMouseUp)
+    window.addEventListener('pointerlockchange', this.onPointerLockChange)
+    this.canvas.addEventListener('mousedown', this.onMouseDown)
+    this.canvas.addEventListener('wheel', this.onWheel, { passive: false })
+    this.canvas.addEventListener('contextmenu', this.onContextMenu)
   }
 
   private unbindInput(): void {
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('keyup', this.onKeyUp)
-    this.canvas.removeEventListener('mousedown', this.onMouseDown)
-    this.canvas.removeEventListener('mouseup', this.onMouseUp)
     window.removeEventListener('mousemove', this.onMouseMove)
+    window.removeEventListener('mouseup', this.onMouseUp)
+    window.removeEventListener('pointerlockchange', this.onPointerLockChange)
+    this.canvas.removeEventListener('mousedown', this.onMouseDown)
+    this.canvas.removeEventListener('wheel', this.onWheel)
+    this.canvas.removeEventListener('contextmenu', this.onContextMenu)
     this.keys.clear()
+    this.cameraOrbiting = false
+    this.cameraRig.endOrbit()
   }
 
   private releaseMouse(): void {
@@ -232,4 +306,5 @@ export class ExplorationController {
   }
 }
 
+export { formatDistanceKm }
 export type { ExplorationHudSnapshot }

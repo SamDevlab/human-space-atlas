@@ -6,8 +6,9 @@ import { generateSyntheticCatalog } from '../src/lib/syntheticCatalog'
 import { percentile, summarizeDurations } from '../src/lib/performanceStats'
 import { AutoRenderController, resolveRenderLimit, selectRenderSet } from '../src/lib/renderSet'
 import { LatestOnlyQueue } from '../src/workers/latestOnlyQueue'
-import { Cartesian3, Cartographic } from 'cesium'
-import { createShipState, integrateShip, MIN_ALTITUDE_METERS } from '../src/exploration/flightModel'
+import { Cartesian3, Cartographic, Quaternion } from 'cesium'
+import { createShipState, integrateShip, MAX_ANGULAR_SPEED_RADIANS_PER_SECOND, MAX_SPEED_METERS_PER_SECOND, MIN_ALTITUDE_METERS } from '../src/exploration/flightModel'
+import { applyCameraOrbit, applyCameraZoom, clampCameraPitch, DEFAULT_CAMERA_DISTANCE_METERS, MAX_CAMERA_DISTANCE_METERS, MIN_CAMERA_DISTANCE_METERS } from '../src/exploration/ShipCameraRig'
 
 const record = (id: number, type: string, name: string): OmmRecord => ({
   OBJECT_NAME: name, EPOCH: '2026-08-16T00:00:00.000Z', NORAD_CAT_ID: id,
@@ -83,25 +84,73 @@ describe('active render set policy', () => {
 })
 
 describe('exploration flight model', () => {
+  const neutralInput = { throttleDelta: 0, strafe: 0, vertical: 0, yawRate: 0, pitchRate: 0, rollInput: 0, boost: false, brake: false }
+
   it('uses real delta independently of simulated time multiplier', () => {
     const state = createShipState(Cartesian3.fromDegrees(0, 0, 800_000))
-    const input = { forward: 1, strafe: 0, vertical: 0, yawRate: 0, pitchRate: 0, rollRate: 0, boost: false, brake: false }
-    const oneX = integrateShip(state, input, 0.016)
-    const hundredX = integrateShip(state, input, 0.016)
-    expect(Cartesian3.distance(oneX.position, hundredX.position)).toBe(0)
-    expect(Cartesian3.magnitude(oneX.velocity)).toBeGreaterThan(0)
+    const input = { ...neutralInput, throttleDelta: 1 }
+    const simulate = (step: number) => {
+      let next = state
+      for (let elapsed = 0; elapsed < 1; elapsed += step) next = integrateShip(next, input, step)
+      return next
+    }
+    const thirtyFps = simulate(1 / 30)
+    const sixtyFps = simulate(1 / 60)
+    const oneTwentyFps = simulate(1 / 120)
+    expect(Cartesian3.distance(thirtyFps.position, sixtyFps.position)).toBeLessThan(20)
+    expect(Cartesian3.distance(sixtyFps.position, oneTwentyFps.position)).toBeLessThan(20)
+    expect(Cartesian3.magnitude(sixtyFps.velocity)).toBeGreaterThan(0)
   })
 
   it('keeps the ship outside the Earth safety boundary', () => {
     const state = createShipState(Cartesian3.fromDegrees(0, 0, 10_000))
-    const next = integrateShip(state, { forward: 0, strafe: 0, vertical: 0, yawRate: 0, pitchRate: 0, rollRate: 0, boost: false, brake: false }, 0.016)
+    const next = integrateShip(state, neutralInput, 0.016)
     expect(Cartographic.fromCartesian(next.position).height).toBeGreaterThanOrEqual(MIN_ALTITUDE_METERS - 1)
   })
 
-  it('supports six-axis thrust and speed limiting', () => {
+  it('keeps throttle persistent and supports forward/reverse control', () => {
     const state = createShipState(Cartesian3.fromDegrees(0, 0, 800_000))
-    const next = integrateShip(state, { forward: 1, strafe: 1, vertical: 1, yawRate: 0, pitchRate: 0, rollRate: 1, boost: true, brake: false }, 0.1)
-    expect(Cartesian3.magnitude(next.velocity)).toBeLessThanOrEqual(50_000)
-    expect(next.angularVelocity.z).toBe(1)
+    const forward = integrateShip(state, { ...neutralInput, throttleDelta: 1 }, 0.5)
+    const reverse = integrateShip(forward, { ...neutralInput, throttleDelta: -1 }, 0.5)
+    expect(forward.throttle).toBeGreaterThan(0)
+    expect(reverse.throttle).toBeLessThan(forward.throttle)
+    expect(integrateShip(forward, neutralInput, 0.5).throttle).toBe(forward.throttle)
+  })
+
+  it('brakes velocity, boosts acceleration and limits speed', () => {
+    const state = { ...createShipState(Cartesian3.fromDegrees(0, 0, 800_000)), throttle: 1, velocity: new Cartesian3(10_000, 0, 0) }
+    const normal = integrateShip(state, neutralInput, 0.1)
+    const boost = integrateShip(state, { ...neutralInput, boost: true }, 0.1)
+    const brake = integrateShip(state, { ...neutralInput, brake: true }, 0.1)
+    expect(Cartesian3.magnitude(boost.velocity)).toBeGreaterThan(Cartesian3.magnitude(normal.velocity))
+    expect(Cartesian3.magnitude(brake.velocity)).toBeLessThan(Cartesian3.magnitude(state.velocity))
+    expect(Cartesian3.magnitude(integrateShip(state, { ...neutralInput, boost: true }, 10).velocity)).toBeLessThanOrEqual(MAX_SPEED_METERS_PER_SECOND)
+  })
+
+  it('smooths pitch/yaw/roll with bounded angular velocity and stable quaternions', () => {
+    const state = createShipState(Cartesian3.fromDegrees(0, 0, 800_000))
+    const turning = integrateShip(state, { ...neutralInput, yawRate: 1, pitchRate: -1, rollInput: 1 }, 0.1)
+    const damping = integrateShip(turning, neutralInput, 0.1)
+    expect(turning.angularVelocity.y).toBeGreaterThan(0)
+    expect(turning.angularVelocity.x).toBeLessThan(0)
+    expect(turning.angularVelocity.z).toBeGreaterThan(0)
+    expect(turning.angularVelocity.y).toBeLessThanOrEqual(MAX_ANGULAR_SPEED_RADIANS_PER_SECOND)
+    expect(Math.abs(Quaternion.magnitude(turning.orientation) - 1)).toBeLessThan(0.0001)
+    expect(Math.abs(damping.angularVelocity.y)).toBeLessThan(Math.abs(turning.angularVelocity.y))
+  })
+})
+
+describe('exploration camera rig math', () => {
+  it('maps mouse orbit to yaw/pitch and clamps pitch', () => {
+    const orbit = applyCameraOrbit({ yaw: 0, pitch: 0, distance: DEFAULT_CAMERA_DISTANCE_METERS }, 100, -100)
+    expect(orbit.yaw).toBeLessThan(0)
+    expect(orbit.pitch).toBeGreaterThan(0)
+    expect(clampCameraPitch(100)).toBeLessThan(Math.PI / 2)
+    expect(clampCameraPitch(-100)).toBeGreaterThan(-Math.PI / 2)
+  })
+
+  it('clamps camera zoom to safe distances', () => {
+    expect(applyCameraZoom({ yaw: 0, pitch: 0, distance: DEFAULT_CAMERA_DISTANCE_METERS }, -100_000).distance).toBe(MIN_CAMERA_DISTANCE_METERS)
+    expect(applyCameraZoom({ yaw: 0, pitch: 0, distance: DEFAULT_CAMERA_DISTANCE_METERS }, 100_000).distance).toBe(MAX_CAMERA_DISTANCE_METERS)
   })
 })
