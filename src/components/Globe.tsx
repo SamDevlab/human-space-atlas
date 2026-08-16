@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react'
 import {
   Cartesian3,
+  Cartesian2,
   Color,
   Ion,
   PointPrimitiveCollection,
@@ -65,7 +66,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
     viewerRef.current = viewer
 
     const handler = new ScreenSpaceEventHandler(viewer.scene.canvas)
-    handler.setInputAction((movement: { position: Cartesian2Like }) => {
+    handler.setInputAction((movement: { position: Cartesian2 }) => {
       const picked = viewer.scene.pick(movement.position)
       const id = picked?.id?.catalogId
       onSelect(typeof id === 'number' ? id : null)
@@ -153,5 +154,3 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect }: GlobeProps
 
   return <div className="globe" ref={containerRef} />
 }
-
-type Cartesian2Like = { x: number; y: number }
