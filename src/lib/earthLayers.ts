@@ -153,6 +153,93 @@ export function createNasaCloudTexture(): HTMLCanvasElement {
   return softenCloudTexture(renderCloudImage(CLOUD_TEXTURE_WIDTH, CLOUD_TEXTURE_HEIGHT))
 }
 
+export type ExploreCloudCard = {
+  longitudeDeg: number
+  latitudeDeg: number
+  altitudeMeters: number
+  widthMeters: number
+  heightMeters: number
+  alpha: number
+  rotation: number
+  imageIndex: number
+  highLayer: boolean
+}
+
+function wrapLongitude(longitude: number): number {
+  return ((longitude + 180) % 360 + 360) % 360 - 180
+}
+
+/**
+ * Turn the observed cloud mask into sparse, Earth-anchored impostors. The
+ * mask decides where banks exist; small overlapping cards provide the
+ * old-school 2.5D volume without covering the whole planet with fog.
+ */
+export function createExploreCloudCards(texture: HTMLCanvasElement): ExploreCloudCard[] {
+  const context = texture.getContext('2d', { willReadFrequently: true })
+  if (!context) return []
+  const pixels = context.getImageData(0, 0, texture.width, texture.height).data
+  const columns = 40
+  const rows = 20
+  const candidates: Array<{ longitudeDeg: number; latitudeDeg: number; coverage: number; seed: number; highLayer: boolean }> = []
+  const alphaAt = (x: number, y: number) => {
+    const wrappedX = ((x % texture.width) + texture.width) % texture.width
+    const clampedY = Math.max(0, Math.min(texture.height - 1, y))
+    return pixels[(clampedY * texture.width + wrappedX) * 4 + 3] / 255
+  }
+
+  for (let row = 1; row < rows - 1; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const centerX = Math.round((column + 0.5) / columns * texture.width)
+      const centerY = Math.round((row + 0.5) / rows * texture.height)
+      let coverage = 0
+      for (let y = -2; y <= 2; y += 1) {
+        for (let x = -3; x <= 3; x += 1) coverage = Math.max(coverage, alphaAt(centerX + x * 7, centerY + y * 7))
+      }
+      if (coverage < 0.055) continue
+      const seed = seededNoise(column * 17 + 7, row * 31 + 13)
+      if (seed > 0.22 + coverage * 0.64) continue
+      candidates.push({
+        longitudeDeg: -180 + (column + 0.5) / columns * 360,
+        latitudeDeg: 90 - (row + 0.5) / rows * 180,
+        coverage,
+        seed,
+        highLayer: seededNoise(column * 19 + 3, row * 23 + 5) > 0.82,
+      })
+    }
+  }
+
+  candidates.sort((left, right) => right.coverage - left.coverage)
+  return candidates.slice(0, 180).flatMap((candidate) => {
+    const cards: ExploreCloudCard[] = []
+    const clusterSize = candidate.highLayer ? 4 : candidate.coverage > 0.55 ? 7 : 5
+    const elongated = seededNoise(candidate.seed * 97 + 4, candidate.seed * 53 + 9) > 0.68
+    for (let index = 0; index < clusterSize; index += 1) {
+      const angle = seededNoise(candidate.seed * 101 + index * 7, candidate.seed * 47 + index * 11) * Math.PI * 2
+      const spread = candidate.highLayer ? 0.78 : 1.15
+      const distance = (0.18 + seededNoise(candidate.seed * 61 + index * 13, candidate.seed * 29 + index * 17) * 0.82) * spread
+      const latitudeOffset = Math.sin(angle) * distance
+      const longitudeScale = Math.max(0.2, Math.cos(candidate.latitudeDeg * Math.PI / 180))
+      const longitudeOffset = Math.cos(angle) * distance / longitudeScale
+      const widthMeters = (candidate.highLayer ? 145_000 : 105_000) + candidate.coverage * (candidate.highLayer ? 125_000 : 155_000)
+      const widthVariation = 0.68 + seededNoise(candidate.seed * 71 + index * 5, candidate.seed * 37 + index * 3) * 0.64
+      const heightRatio = elongated ? 0.24 + seededNoise(index + 13, Math.round(candidate.seed * 1000) + 17) * 0.14 : 0.42 + seededNoise(index + 19, Math.round(candidate.seed * 1000) + 23) * 0.24
+      const altitudeMeters = candidate.highLayer ? 10_500 + index * 1_900 : 3_500 + (index % 3) * 3_600
+      cards.push({
+        longitudeDeg: wrapLongitude(candidate.longitudeDeg + longitudeOffset),
+        latitudeDeg: Math.max(-82, Math.min(82, candidate.latitudeDeg + latitudeOffset)),
+        altitudeMeters,
+        widthMeters: widthMeters * widthVariation,
+        heightMeters: widthMeters * widthVariation * heightRatio,
+        alpha: Math.min(0.94, 0.52 + candidate.coverage * (candidate.highLayer ? 0.38 : 0.48)),
+        rotation: angle + (elongated ? 0 : (seededNoise(index + 29, Math.round(candidate.seed * 1000) + 31) - 0.5) * 0.7),
+        imageIndex: Math.floor(seededNoise(candidate.seed * 83 + index * 7, candidate.seed * 43 + index * 11) * 4),
+        highLayer: candidate.highLayer,
+      })
+    }
+    return cards
+  })
+}
+
 function cloudCacheKey(observationDate: string): string {
   const origin = typeof window === 'undefined' ? 'https://human-space-atlas.invalid' : window.location.origin
   return `${origin}/__hsa-cloud-cache/${observationDate}/${CLOUD_TEXTURE_WIDTH}x${CLOUD_TEXTURE_HEIGHT}.png`
@@ -322,7 +409,7 @@ export function createNasaCloudTextureFromApi(observationDate = cloudObservation
 
 /** Create a soft, transparent and slightly varied sprite used for low-orbit cloud banks. */
 export function createCloudBillboardTexture(seed = 0): HTMLCanvasElement {
-  const canvas = Object.assign(document.createElement('canvas'), { width: 320, height: 180 })
+  const canvas = Object.assign(document.createElement('canvas'), { width: 512, height: 256 })
   const context = canvas.getContext('2d')
   if (!context) return canvas
 
@@ -332,16 +419,16 @@ export function createCloudBillboardTexture(seed = 0): HTMLCanvasElement {
   }
   context.clearRect(0, 0, canvas.width, canvas.height)
   context.filter = 'blur(1.6px)'
-  for (let index = 0; index < 16; index += 1) {
-    const x = 34 + random(index * 4) * 252
-    const y = 52 + random(index * 4 + 1) * 78
-    const radiusX = 20 + random(index * 4 + 2) * 34
-    const radiusY = 11 + random(index * 4 + 3) * 20
+  for (let index = 0; index < 24; index += 1) {
+    const x = 52 + random(index * 4) * 408
+    const y = 74 + random(index * 4 + 1) * 112
+    const radiusX = 24 + random(index * 4 + 2) * 46
+    const radiusY = 14 + random(index * 4 + 3) * 27
     context.save()
     context.translate(x, y)
     context.scale(1, radiusY / radiusX)
     const gradient = context.createRadialGradient(0, 0, 0, 0, 0, radiusX)
-    const opacity = 0.24 + random(index * 4 + 4) * 0.42
+    const opacity = 0.42 + random(index * 4 + 4) * 0.42
     gradient.addColorStop(0, `rgba(255, 255, 255, ${opacity.toFixed(3)})`)
     gradient.addColorStop(0.46, `rgba(242, 250, 255, ${(opacity * 0.68).toFixed(3)})`)
     gradient.addColorStop(1, 'rgba(255, 255, 255, 0)')
