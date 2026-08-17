@@ -453,10 +453,10 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     // Explore gets a cinematic volume instead of a flat map overlay. The
     // map uses the continuous shell; Explore uses Earth-anchored cloud banks
     // with separate low and high strata so the terrain remains readable.
-    // Explore keeps a very low-alpha observed macro layer behind the 2.5D
-    // banks. It connects nearby systems at orbital distance without becoming
-    // the opaque white fog that used to sit over the terrain.
-    const cloudShellAlpha = opacity * (explorationActive ? 0.24 : 0.46)
+    // Both modes use the same observed NASA macro layer. Explore adds the
+    // 2.5D banks on top, while the altitude fade keeps it from becoming fog
+    // when the camera gets close to the terrain.
+    const cloudShellAlpha = opacity * 0.46
     const cloudMaterial = Material.fromType('Image', {
       image: cloudTextureUrl,
       color: Color.WHITE.withAlpha(cloudShellAlpha),
