@@ -11,11 +11,14 @@ const NASA_GIBS_CLOUD_WMS_URL = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/be
 
 // Ignore very low confidence coverage. Keeping the low end transparent makes
 // the layer read as separate cloud systems instead of a white global veil.
-const CLOUD_MIN_FRACTION = 30
-const CLOUD_FLOOR_ALPHA = 2
-const CLOUD_TEXTURE_WIDTH = 1024
-const CLOUD_TEXTURE_HEIGHT = 512
-const CLOUD_EDGE_BLUR_PX = 6
+const CLOUD_MIN_FRACTION = 28
+const CLOUD_FLOOR_ALPHA = 0
+const CLOUD_TEXTURE_WIDTH = 2048
+const CLOUD_TEXTURE_HEIGHT = 1024
+const CLOUD_EDGE_BLUR_PX = 9
+
+const CLOUD_PALETTE_TOLERANCE = 8
+const near = (actual: number, expected: number) => Math.abs(actual - expected) <= CLOUD_PALETTE_TOLERANCE
 
 /** Extract a soft alpha from NASA's published cloud-fraction color map. */
 export function cloudAlphaFromRgb(red: number, green: number, blue: number): number {
@@ -28,29 +31,30 @@ export function cloudAlphaFromRgb(red: number, green: number, blue: number): num
 
 /** Preserve the published NASA GIBS palette helpers for catalog consumers. */
 export function cloudFractionFromRgb(red: number, green: number, blue: number): number | null {
-  if (red === 192 && green === 192 && blue === 192) return null
-  if (red === 102 && blue === 119) return green
-  if (red === 183 && blue === 141) return 6 + green - 15
-  if (red === 0 && blue === 100) return 12 + green
-  if (red === 0 && blue === 170) return 19 + green
-  if (red === 0 && blue === 255) return 25 + green
-  if (green === 136 && blue === 238) return 31 + red
-  if (green === 80 && blue === 0) return 38 + red
-  if (green === 136 && blue === 0) return 44 + red
-  if (green === 220 && blue === 0) return 50 + red
-  if (red === 255 && green === 255) return 57 + blue
-  if (red === 240 && green === 190) return 63 + blue - 64
-  if (red === 187 && green === 136) return 69 + blue
-  if (red === 122 && green === 90) return 76 + blue - 3
-  if (red === 110 && green === 0) return 82 + blue
-  if (red === 170 && green === 0) return 88 + blue
-  if (red === 255 && green === 0) return 95 + blue
+  if (near(red, 192) && near(green, 192) && near(blue, 192)) return null
+  if (near(red, 102) && near(blue, 119)) return green
+  if (near(red, 183) && near(blue, 141)) return 6 + green - 15
+  if (near(red, 0) && near(blue, 100)) return 12 + green
+  if (near(red, 0) && near(blue, 170)) return 19 + green
+  if (near(red, 0) && near(blue, 255)) return 25 + green
+  if (near(green, 136) && near(blue, 238)) return 31 + red
+  if (near(green, 80) && near(blue, 0)) return 38 + red
+  if (near(green, 136) && near(blue, 0)) return 44 + red
+  if (near(green, 220) && near(blue, 0)) return 50 + red
+  if (near(red, 255) && near(green, 255)) return 57 + blue
+  if (near(red, 240) && near(green, 190)) return 63 + blue - 64
+  if (near(red, 187) && near(green, 136)) return 69 + blue
+  if (near(red, 122) && near(green, 90)) return 76 + blue - 3
+  if (near(red, 110) && near(green, 0)) return 82 + blue
+  if (near(red, 170) && near(green, 0)) return 88 + blue
+  if (near(red, 255) && near(green, 0)) return 95 + blue
   return null
 }
 
 export function cloudAlphaFromFraction(fraction: number | null): number {
   if (fraction === null || fraction < CLOUD_MIN_FRACTION) return 0
-  return Math.round((0.012 + ((fraction - CLOUD_MIN_FRACTION) / (100 - CLOUD_MIN_FRACTION)) * 0.34) * 255)
+  const coverage = Math.min(1, Math.max(0, (fraction - CLOUD_MIN_FRACTION) / (100 - CLOUD_MIN_FRACTION)))
+  return Math.round((0.008 + coverage * 0.27) * 255)
 }
 
 function smoothstep(value: number): number {
@@ -227,11 +231,12 @@ export async function createNasaCloudTextureFromApi(observationDate = cloudObser
     // Clouds are bright and comparatively desaturated in the true-colour
     // composite; using the product of both signals rejects blue ocean haze.
     const trueColorDetail = brightCloud * lowSaturation
-    // Require a clear bright/desaturated signal from the true-colour image;
-    // the coverage product alone is too broad and would read as blue haze.
-    const detail = smoothstep(Math.min(1, Math.max(0, (trueColorDetail - 0.18) / 0.48)))
+    // The coverage product is the source of truth for location. True color
+    // only adds a soft density cue; using it as a hard gate made real cloud
+    // systems disappear whenever the composite was dim or partially sampled.
+    const detail = smoothstep(Math.min(1, Math.max(0, (trueColorDetail - 0.12) / 0.52)))
     const noData = red + green + blue < 42
-    const alpha = noData ? 0 : Math.min(255, Math.round(realAlpha * detail * 1.45))
+    const alpha = noData ? 0 : Math.min(255, Math.round(realAlpha * (0.72 + detail * 0.38)))
     // Render the observed formations as soft white cloud volume. The NASA
     // coverage mask supplies their location; the true-colour signal only
     // controls edge density so oceans do not become a blue veil.

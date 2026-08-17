@@ -48,8 +48,8 @@ function App() {
   const [mapStyleLoading, setMapStyleLoading] = useState(false)
   const [cloudsEnabled, setCloudsEnabled] = useState(() => localStorage.getItem('human-space-atlas.clouds-enabled') !== '0')
   const [cloudOpacity, setCloudOpacity] = useState(() => {
-    const saved = Number(localStorage.getItem('human-space-atlas.cloud-opacity'))
-    return Number.isFinite(saved) ? Math.min(0.7, Math.max(0, saved)) : 0.55
+    const saved = Number(localStorage.getItem('human-space-atlas.cloud-opacity-v2'))
+    return Number.isFinite(saved) ? Math.min(0.7, Math.max(0, saved)) : 0.42
   })
   const [cloudShadowsEnabled, setCloudShadowsEnabled] = useState(() => localStorage.getItem('human-space-atlas.cloud-shadows-enabled') !== '0')
   const [atmosphereEnabled, setAtmosphereEnabled] = useState(() => localStorage.getItem('human-space-atlas.atmosphere-enabled') !== '0')
@@ -65,7 +65,10 @@ function App() {
   })
   const [aircraftStates, setAircraftStates] = useState<AircraftState[]>([])
   const [selectedAircraftId, setSelectedAircraftId] = useState<string | null>(null)
-  const [earthEventsEnabled, setEarthEventsEnabled] = useState(() => localStorage.getItem('human-space-atlas.earth-events-enabled') !== '0')
+  // Earth events are opt-in in the clean visual mode. The versioned key also
+  // prevents an older session that had events enabled from re-enabling them
+  // on the first visit after this visual change.
+  const [earthEventsEnabled, setEarthEventsEnabled] = useState(() => localStorage.getItem('human-space-atlas.earth-events-enabled-v2') === '1')
   const [eventCategories, setEventCategories] = useState<string[]>(() => EARTH_EVENT_CATEGORIES.map((category) => category.id))
   const [earthEvents, setEarthEvents] = useState<EarthEvent[]>([])
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
@@ -128,7 +131,7 @@ function App() {
   useEffect(() => { localStorage.setItem('human-space-atlas.render-limit', String(customLimit)) }, [customLimit])
   useEffect(() => { localStorage.setItem('human-space-atlas.map-style-v2', mapStyle) }, [mapStyle])
   useEffect(() => { localStorage.setItem('human-space-atlas.clouds-enabled', cloudsEnabled ? '1' : '0') }, [cloudsEnabled])
-  useEffect(() => { localStorage.setItem('human-space-atlas.cloud-opacity', String(cloudOpacity)) }, [cloudOpacity])
+  useEffect(() => { localStorage.setItem('human-space-atlas.cloud-opacity-v2', String(cloudOpacity)) }, [cloudOpacity])
   useEffect(() => { localStorage.setItem('human-space-atlas.cloud-shadows-enabled', cloudShadowsEnabled ? '1' : '0') }, [cloudShadowsEnabled])
   useEffect(() => { localStorage.setItem('human-space-atlas.atmosphere-enabled', atmosphereEnabled ? '1' : '0') }, [atmosphereEnabled])
   useEffect(() => { localStorage.setItem('human-space-atlas.terrain-enabled', terrainEnabled ? '1' : '0') }, [terrainEnabled])
@@ -137,7 +140,7 @@ function App() {
   useEffect(() => { localStorage.setItem('human-space-atlas.aircraft-enabled', aircraftEnabled ? '1' : '0') }, [aircraftEnabled])
   useEffect(() => { localStorage.setItem('human-space-atlas.aircraft-routes-enabled', aircraftRoutesEnabled ? '1' : '0') }, [aircraftRoutesEnabled])
   useEffect(() => { localStorage.setItem('human-space-atlas.aircraft-density', String(aircraftDensity)) }, [aircraftDensity])
-  useEffect(() => { localStorage.setItem('human-space-atlas.earth-events-enabled', earthEventsEnabled ? '1' : '0') }, [earthEventsEnabled])
+  useEffect(() => { localStorage.setItem('human-space-atlas.earth-events-enabled-v2', earthEventsEnabled ? '1' : '0') }, [earthEventsEnabled])
   useEffect(() => { localStorage.setItem('human-space-atlas.explore-camera-sensitivity', String(exploreCameraSensitivity)) }, [exploreCameraSensitivity])
   useEffect(() => { localStorage.setItem('human-space-atlas.explore-camera-preset', exploreCameraPreset) }, [exploreCameraPreset])
   useEffect(() => { localStorage.setItem('human-space-atlas.explore-object-marker', exploreObjectMarkerEnabled ? '1' : '0') }, [exploreObjectMarkerEnabled])

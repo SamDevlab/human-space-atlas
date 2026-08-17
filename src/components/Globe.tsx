@@ -45,6 +45,7 @@ import type { WorkerCommand, WorkerResult } from '../workers/orbitProtocol'
 import { shouldApplyPositionResult } from '../workers/workerState'
 import { ExplorationController } from '../exploration/ExplorationController'
 import type { ExplorationCameraPreset, ExplorationHudSnapshot } from '../exploration/types'
+import { createHighResolutionSpaceSkyBox } from '../lib/spaceBackground'
 
 interface GlobeProps {
   objects: OmmRecord[]
@@ -173,7 +174,14 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       infoBox: false,
       selectionIndicator: false,
       shouldAnimate: true,
+      useBrowserRecommendedResolution: false,
     })
+
+    // Cesium's default star map is intentionally tiny. Use the display's
+    // native pixel density plus a modest quality headroom so the sky and thin
+    // atmospheric edge do not look like enlarged pixels on a large monitor.
+    viewer.resolutionScale = Math.min(1.65, Math.max(1.15, window.devicePixelRatio || 1))
+    viewer.scene.skyBox = createHighResolutionSpaceSkyBox()
 
     const cameraController = viewer.scene.screenSpaceCameraController
     cameraController.enableCollisionDetection = true
@@ -190,8 +198,8 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     viewer.scene.globe.enableLighting = true
     // Keep terrain and imagery tiles refining while the camera approaches the
     // surface. The cloud field is intentionally handled separately below.
-    viewer.scene.globe.maximumScreenSpaceError = 2.15
-    viewer.scene.globe.tileCacheSize = 384
+    viewer.scene.globe.maximumScreenSpaceError = 0.8
+    viewer.scene.globe.tileCacheSize = 1024
     viewer.scene.globe.preloadAncestors = true
     viewer.scene.globe.preloadSiblings = true
     viewer.scene.globe.depthTestAgainstTerrain = true
@@ -440,7 +448,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     // The procedural shell is the readable low-orbit volume. Keep it strong
     // enough to show individual cloud systems, but let the texture's alpha
     // define the shape so it never becomes a uniform white veil.
-    const cloudShellAlpha = opacity * (explorationActive ? 0.78 : 0.52)
+    const cloudShellAlpha = opacity * (explorationActive ? 0.68 : 0.46)
     const cloudMaterial = Material.fromType('Image', {
       image: cloudTextureUrl,
       color: Color.WHITE.withAlpha(cloudShellAlpha),
@@ -495,16 +503,17 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
         // Use the observed NASA mask directly in Explore so clouds stay
         // attached to the Earth instead of floating in front of the camera.
         const detailFade = Math.max(0, Math.min(1, (height - 900_000) / 1_900_000))
-        cloudLayer.alpha = explorationActive
-          ? opacity * 0.9
-          : opacity * detailFade * 0.95
-        cloudLayer.show = explorationActive || detailFade > 0.01
+        // In Explore the elevated shell is the cloud view. Keeping the
+        // single low-resolution map texture over the terrain made the scene
+        // look like a white dust filter at close range.
+        cloudLayer.alpha = opacity * detailFade * 0.82
+        cloudLayer.show = !explorationActive && detailFade > 0.01
         // Fade the optional elevated map shells when the camera gets close
         // to the surface; Explore has no separate floating cloud geometry.
         const shellFade = Math.max(0.3, Math.min(1, 0.3 + (height - 70_000) / 250_000))
         cloudMaterial.uniforms.color = Color.WHITE.withAlpha(cloudShellAlpha * shellFade)
         wispyMaterial.uniforms.color = Color.fromCssColorString('#d8efff').withAlpha(cloudShellAlpha * 0.2 * shellFade)
-        shadowMaterial.uniforms.color = Color.fromCssColorString('#0a1825').withAlpha(opacity * (explorationActive ? 0.12 : 0.07) * shellFade)
+        shadowMaterial.uniforms.color = Color.fromCssColorString('#0a1825').withAlpha(opacity * (explorationActive ? 0.08 : 0.07) * shellFade)
         if (cloudShell) cloudShell.show = shellFade > 0.02
         if (shadowShell) shadowShell.show = cloudShadowsEnabled && shellFade > 0.15
         const cloudRotation = Matrix3.fromRotationZ((performance.now() - cloudMotionStartedAt) / 1000 * CLOUD_DRIFT_RADIANS_PER_SECOND, new Matrix3())
@@ -676,19 +685,24 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     for (const entity of viewer.entities.values.filter((item) => String(item.id).startsWith('earth-event-'))) viewer.entities.remove(entity)
     if (!earthEventsEnabled) return
     const allowed = new Set(eventCategories)
+    const eventVisuals: Array<{ entity: Entity; anchor: Cartesian3 }> = []
     for (const event of earthEvents) {
       if (allowed.size && !allowed.has(event.categoryId)) continue
       const color = Color.fromCssColorString(eventColor(event.categoryId))
       const id = `earth-event-${event.id}`
       if (event.geometry.type === 'Point') {
-        viewer.entities.add({
+        const anchor = Cartesian3.fromDegrees(event.geometry.coordinates[0], event.geometry.coordinates[1])
+        const entity = viewer.entities.add({
           id,
-          position: Cartesian3.fromDegrees(event.geometry.coordinates[0], event.geometry.coordinates[1]),
+          position: anchor,
           properties: { earthEventId: event.id },
           point: { pixelSize: 10, color, outlineColor: Color.WHITE, outlineWidth: 1, heightReference: HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY },
         })
+        eventVisuals.push({ entity, anchor })
       } else {
-        viewer.entities.add({
+        const anchorCoordinates = event.geometry.coordinates.reduce((sum, [longitude, latitude]) => [sum[0] + longitude, sum[1] + latitude], [0, 0])
+        const anchor = Cartesian3.fromDegrees(anchorCoordinates[0] / event.geometry.coordinates.length, anchorCoordinates[1] / event.geometry.coordinates.length)
+        const entity = viewer.entities.add({
           id,
           properties: { earthEventId: event.id },
           polygon: {
@@ -699,7 +713,27 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
             classificationType: new ConstantProperty(ClassificationType.TERRAIN),
           },
         })
+        eventVisuals.push({ entity, anchor })
       }
+    }
+
+    const cameraNormal = new Cartesian3()
+    const eventNormal = new Cartesian3()
+    const updateEventVisibility = () => {
+      if (viewer.isDestroyed()) return
+      Cartesian3.normalize(viewer.camera.positionWC, cameraNormal)
+      for (const { entity, anchor } of eventVisuals) {
+        Cartesian3.normalize(anchor, eventNormal)
+        // EONET markers are only useful on the hemisphere facing the camera.
+        // This also prevents the old always-on depth bypass from showing
+        // orange points through the planet from the far side.
+        entity.show = Cartesian3.dot(cameraNormal, eventNormal) > 0.08
+      }
+    }
+    updateEventVisibility()
+    viewer.scene.preRender.addEventListener(updateEventVisibility)
+    return () => {
+      if (!viewer.isDestroyed()) viewer.scene.preRender.removeEventListener(updateEventVisibility)
     }
   }, [earthEvents, earthEventsEnabled, eventCategories, onEarthEventSelect])
 
