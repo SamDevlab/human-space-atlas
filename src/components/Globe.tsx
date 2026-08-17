@@ -448,9 +448,9 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     // Explore gets a cinematic volume instead of a flat map overlay. The
     // map uses the continuous shell; Explore uses Earth-anchored cloud banks
     // with separate low and high strata so the terrain remains readable.
-    // Both modes use the same observed NASA macro layer. Explore keeps the
-    // same visual language as the normal globe and uses only the altitude
-    // fade to prevent it from becoming fog when the camera gets close.
+    // The observed NASA cloud layer remains available to the normal globe.
+    // Explore intentionally leaves it out until there is a true volumetric
+    // representation; a flat mask is more misleading than no cloud layer.
     const cloudShellAlpha = opacity * 0.46
     const cloudMaterial = Material.fromType('Image', {
       image: cloudTextureUrl,
@@ -478,7 +478,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       cull: false,
       show: true,
     }))
-    const cloudShell = createCloudShell(9_500, cloudMaterial)
+    const cloudShell = explorationActive ? null : createCloudShell(9_500, cloudMaterial)
     // The low shadow shell is useful in the map view, but from the spacecraft
     // it sits directly in front of the terrain and exaggerates any source
     // pixel into square plates. Explore keeps the soft high cloud volume and
