@@ -9,25 +9,35 @@ export const NASA_GIBS_NIGHT_LIGHTS_SOURCE = 'Luzes urbanas noturnas VIIRS · NA
 const NASA_GIBS_WMS_URL = 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi'
 const NASA_GIBS_CLOUD_WMS_URL = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi'
 
-// Ignore very low confidence coverage. Keeping the low end transparent makes
-// the layer read as separate cloud systems instead of a white global veil.
-const CLOUD_MIN_FRACTION = 34
+// Low cloud-fraction values are useful scientifically, but turning all of
+// them into visible white alpha made the Atlas layer read as a global haze.
+// Keep the observed field authoritative while only visualising formations
+// strong enough to read as discrete systems from orbit.
+const CLOUD_MIN_FRACTION = 42
 const CLOUD_FLOOR_ALPHA = 0
 const CLOUD_TEXTURE_WIDTH = 2048
 const CLOUD_TEXTURE_HEIGHT = 1024
-const CLOUD_EDGE_BLUR_PX = 3.5
-const CLOUD_CACHE_NAME = 'human-space-atlas-cloud-textures-v1'
+const CLOUD_EDGE_BLUR_PX = 1.25
+// Bump the cache whenever the visual extraction changes. Otherwise browsers
+// can keep showing the older fog-like texture for days after a deployment.
+const CLOUD_CACHE_NAME = 'human-space-atlas-cloud-textures-v2'
 
 const CLOUD_PALETTE_TOLERANCE = 8
 const near = (actual: number, expected: number) => Math.abs(actual - expected) <= CLOUD_PALETTE_TOLERANCE
 
-/** Extract a soft alpha from NASA's published cloud-fraction color map. */
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value))
+}
+
+/** Extract a structured alpha from NASA's published cloud-fraction color map. */
 export function cloudAlphaFromRgb(red: number, green: number, blue: number): number {
   const fraction = cloudFractionFromRgb(red, green, blue)
   if (fraction === null || fraction < CLOUD_MIN_FRACTION) return 0
-  const coverage = Math.min(1, Math.max(0, (fraction - CLOUD_MIN_FRACTION) / (100 - CLOUD_MIN_FRACTION)))
-  const featheredCoverage = coverage * coverage * (3 - 2 * coverage)
-  return Math.round((0.006 + featheredCoverage * 0.48) * 255)
+  const coverage = clamp01((fraction - CLOUD_MIN_FRACTION) / (100 - CLOUD_MIN_FRACTION))
+  const featheredCoverage = smoothstep(coverage)
+  // High-confidence formations get enough opacity to read as cloud systems,
+  // while the low end stays transparent instead of becoming a white veil.
+  return Math.round((0.012 + Math.pow(featheredCoverage, 1.12) * 0.76) * 255)
 }
 
 /** Preserve the published NASA GIBS palette helpers for catalog consumers. */
@@ -54,12 +64,36 @@ export function cloudFractionFromRgb(red: number, green: number, blue: number): 
 
 export function cloudAlphaFromFraction(fraction: number | null): number {
   if (fraction === null || fraction < CLOUD_MIN_FRACTION) return 0
-  const coverage = Math.min(1, Math.max(0, (fraction - CLOUD_MIN_FRACTION) / (100 - CLOUD_MIN_FRACTION)))
-  return Math.round((0.004 + coverage * 0.2) * 255)
+  const coverage = clamp01((fraction - CLOUD_MIN_FRACTION) / (100 - CLOUD_MIN_FRACTION))
+  return Math.round(Math.pow(smoothstep(coverage), 1.08) * 0.72 * 255)
 }
 
 function smoothstep(value: number): number {
-  return value * value * (3 - 2 * value)
+  const clamped = clamp01(value)
+  return clamped * clamped * (3 - 2 * clamped)
+}
+
+/**
+ * Convert the NASA coverage alpha plus the same-day true-colour observation
+ * into a neutral cloud pixel for the Atlas view. The coverage product decides
+ * where clouds exist; true colour only provides internal light/dark structure.
+ */
+export function atlasCloudVisualFromSignals(realAlpha: number, red: number, green: number, blue: number): [number, number, number, number] {
+  if (realAlpha <= 0 || red + green + blue < 42) return [255, 255, 255, 0]
+
+  const brightness = (red + green + blue) / (255 * 3)
+  const trueColorMax = Math.max(red, green, blue)
+  const saturation = (trueColorMax - Math.min(red, green, blue)) / Math.max(trueColorMax, 1)
+  const brightCloud = smoothstep((brightness - 0.42) / 0.34)
+  const lowSaturation = smoothstep((0.58 - saturation) / 0.4)
+  const detail = clamp01(brightCloud * lowSaturation)
+  const coverage = realAlpha / 255
+
+  // Preserve some observed luminance variation so large weather systems have
+  // visible cores and filaments instead of becoming one flat white fog layer.
+  const tone = Math.round(Math.min(255, Math.max(184, 190 + brightness * 34 + detail * 40)))
+  const alpha = Math.round(clamp01(coverage * (0.34 + detail * 0.66)) * 255)
+  return [tone, Math.min(255, tone + 2), Math.min(255, tone + 7), alpha]
 }
 
 function seededNoise(column: number, row: number): number {
@@ -91,14 +125,13 @@ function proceduralCloudAlpha(x: number, y: number): number {
   const detail = gridNoise(warpedX * 150, warpedY * 76, 150, 76)
   const fine = gridNoise(warpedX * 320, warpedY * 160, 320, 160)
   const coverage = broad * 0.46 + medium * 0.29 + detail * 0.17 + fine * 0.08
-  // Keep broad systems readable from low orbit, then let the higher
-  // frequencies carve softer edges into them. The previous threshold made
-  // most of the shell effectively transparent in Explore mode.
-  const cloudShape = smoothstep(Math.max(0, Math.min(1, (coverage - 0.44) / 0.22)))
-  const wispyDetail = smoothstep(Math.max(0, Math.min(1, (detail + fine * 0.5 - 0.38) / 0.34)))
+  // The fallback is intentionally sparse. It is only visible while the NASA
+  // observation downloads, so it should never cover the planet like fog.
+  const cloudShape = smoothstep((coverage - 0.5) / 0.17)
+  const wispyDetail = smoothstep((detail + fine * 0.5 - 0.45) / 0.29)
   const latitude = y / CLOUD_TEXTURE_HEIGHT
-  const bandWeight = 0.82 + 0.18 * Math.sin(latitude * Math.PI)
-  return Math.round(cloudShape * (16 + wispyDetail * 94) * bandWeight)
+  const bandWeight = 0.8 + 0.2 * Math.sin(latitude * Math.PI)
+  return Math.round(cloudShape * (12 + wispyDetail * 150) * bandWeight)
 }
 
 function renderCloudImage(width: number, height: number): HTMLCanvasElement {
@@ -111,9 +144,9 @@ function renderCloudImage(width: number, height: number): HTMLCanvasElement {
     const x = pixel % width
     const y = Math.floor(pixel / width)
     const alpha = Math.max(CLOUD_FLOOR_ALPHA, proceduralCloudAlpha(x, y))
-    pixels.data[index] = 255
-    pixels.data[index + 1] = 255
-    pixels.data[index + 2] = 255
+    pixels.data[index] = 238
+    pixels.data[index + 1] = 244
+    pixels.data[index + 2] = 250
     pixels.data[index + 3] = alpha
   }
   context.putImageData(pixels, 0, 0)
@@ -121,10 +154,9 @@ function renderCloudImage(width: number, height: number): HTMLCanvasElement {
 }
 
 /**
- * Feather the satellite mask before it reaches Cesium's elevated shell.
- * GIBS imagery is sampled on a regular grid; without this pass the grid is
- * readable as square cloud plates when the camera is close to the surface.
- * The three-tile draw also keeps the longitude seam continuous.
+ * Feather only the pixel-scale edge stair-stepping from the source grid.
+ * A large blur radius turns distinct cloud systems into atmospheric haze.
+ * The three-tile draw keeps the longitude seam continuous.
  */
 function softenCloudTexture(source: HTMLCanvasElement, blurRadius = CLOUD_EDGE_BLUR_PX): HTMLCanvasElement {
   if (source.width <= 0 || source.height <= 0) return source
@@ -148,7 +180,7 @@ function softenCloudTexture(source: HTMLCanvasElement, blurRadius = CLOUD_EDGE_B
   return softened
 }
 
-/** Shared texture for the mapped layer and the low-orbit cloud shell. */
+/** Shared fallback texture for the mapped layer and low-orbit cloud systems. */
 export function createNasaCloudTexture(): HTMLCanvasElement {
   return softenCloudTexture(renderCloudImage(CLOUD_TEXTURE_WIDTH, CLOUD_TEXTURE_HEIGHT))
 }
@@ -269,33 +301,15 @@ async function loadNasaCloudTextureFromApi(observationDate: string): Promise<HTM
   const trueColorPixels = trueColorContext.getImageData(0, 0, canvas.width, canvas.height)
   for (let index = 0; index < pixels.data.length; index += 4) {
     const realAlpha = cloudAlphaFromRgb(pixels.data[index], pixels.data[index + 1], pixels.data[index + 2])
-    const red = trueColorPixels.data[index]
-    const green = trueColorPixels.data[index + 1]
-    const blue = trueColorPixels.data[index + 2]
-    const brightness = (red + green + blue) / (255 * 3)
-    const trueColorMax = Math.max(red, green, blue)
-    const saturation = (trueColorMax - Math.min(red, green, blue)) / Math.max(trueColorMax, 1)
-    const brightCloud = smoothstep(Math.min(1, Math.max(0, (brightness - 0.48) / 0.28)))
-    const lowSaturation = smoothstep(Math.min(1, Math.max(0, (0.5 - saturation) / 0.32)))
-    // Clouds are bright and comparatively desaturated in the true-colour
-    // composite; using the product of both signals rejects blue ocean haze.
-    const trueColorDetail = brightCloud * lowSaturation
-    // The coverage product is the source of truth for location. True color
-    // only adds a soft density cue; using it as a hard gate made real cloud
-    // systems disappear whenever the composite was dim or partially sampled.
-    const detail = smoothstep(Math.min(1, Math.max(0, (trueColorDetail - 0.2) / 0.52)))
-    const noData = red + green + blue < 42
-    // Keep low-confidence coverage as a feathered edge, but reserve the
-    // stronger alpha for bright, low-saturation formations. This prevents the
-    // global mask from becoming a uniform fog over the terrain.
-    const density = 0.12 + detail * 0.88
-    const alpha = noData ? 0 : Math.min(255, Math.round(realAlpha * density))
-    // Render the observed formations as soft white cloud volume. The NASA
-    // coverage mask supplies their location; the true-colour signal only
-    // controls edge density so oceans do not become a blue veil.
-    pixels.data[index] = 255
-    pixels.data[index + 1] = 255
-    pixels.data[index + 2] = 255
+    const [red, green, blue, alpha] = atlasCloudVisualFromSignals(
+      realAlpha,
+      trueColorPixels.data[index],
+      trueColorPixels.data[index + 1],
+      trueColorPixels.data[index + 2],
+    )
+    pixels.data[index] = red
+    pixels.data[index + 1] = green
+    pixels.data[index + 2] = blue
     pixels.data[index + 3] = alpha
   }
   context.putImageData(pixels, 0, 0)
@@ -320,7 +334,7 @@ export function createNasaCloudTextureFromApi(observationDate = cloudObservation
   return preloadNasaCloudTexture(observationDate)
 }
 
-/** Create a seamless cloud shell; the imagery provider keeps it synchronized with the globe. */
+/** Create the mapped NASA cloud layer; the same field seeds Explore volumes. */
 export async function createNasaCloudProvider(observationDate = NASA_GIBS_CLOUD_OBSERVATION_DATE, texture?: HTMLCanvasElement): Promise<SingleTileImageryProvider> {
   const canvas = texture ?? await createNasaCloudTextureFromApi(observationDate)
   return SingleTileImageryProvider.fromUrl(canvas.toDataURL('image/png'), {

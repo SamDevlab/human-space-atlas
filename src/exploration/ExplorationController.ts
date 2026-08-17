@@ -10,6 +10,7 @@ import {
 import { createShipState, formatDistanceKm, getShipBasis, LOW_ALTITUDE_WARNING_METERS } from './flightModel'
 import { ShipCameraRig } from './ShipCameraRig'
 import { ShipVisual } from './ShipVisual'
+import { ExploreCloudSystem } from './ExploreCloudSystem'
 import type { ExplorationCameraMode, ExplorationCameraPreset, ExplorationHudSnapshot, ShipState, TargetIndicatorSnapshot } from './types'
 
 interface ControllerOptions {
@@ -29,6 +30,7 @@ const CAMERA_MODE: ExplorationCameraMode = 'THIRD_PERSON'
 const PRESENTATION_POSITION_FOLLOW = 16
 const PRESENTATION_ORIENTATION_FOLLOW = 12
 const TARGET_SAMPLE_MAX_AGE_SECONDS = 0.75
+const CLOUD_SETTINGS_POLL_MS = 750
 
 export class ExplorationController {
   private readonly viewer: Viewer
@@ -36,6 +38,7 @@ export class ExplorationController {
   private readonly canvas: HTMLCanvasElement
   private readonly cameraRig: ShipCameraRig
   private readonly shipVisual: ShipVisual
+  private readonly exploreCloudSystem: ExploreCloudSystem
   private state: ShipState | null = null
   private targetPosition: Cartesian3 | null = null
   private targetPositionGoal: Cartesian3 | null = null
@@ -52,6 +55,8 @@ export class ExplorationController {
   private presentationPosition: Cartesian3 | null = null
   private presentationOrientation: Quaternion | null = null
   private targetSampleAt = 0
+  private exploreCloudsRunning = false
+  private lastCloudSettingsCheck = 0
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     if (!this.active) return
@@ -133,6 +138,7 @@ export class ExplorationController {
     this.canvas = viewer.scene.canvas
     this.cameraRig = new ShipCameraRig(viewer)
     this.shipVisual = new ShipVisual(viewer)
+    this.exploreCloudSystem = new ExploreCloudSystem(viewer)
   }
 
   isActive(): boolean { return this.active }
@@ -165,6 +171,8 @@ export class ExplorationController {
     this.cameraRig.enter(this.state.position, this.state.orientation)
     this.lastFrame = performance.now()
     this.lastHud = 0
+    this.lastCloudSettingsCheck = 0
+    this.syncExploreCloudSettings(true)
     this.frameHandle = requestAnimationFrame(this.frame)
     this.emitHud(performance.now())
   }
@@ -176,6 +184,8 @@ export class ExplorationController {
     this.unbindInput()
     this.releaseMouse()
     this.shipVisual.setVisible(false)
+    this.exploreCloudSystem.stop()
+    this.exploreCloudsRunning = false
     this.cameraRig.exit()
     if (this.savedCamera) this.viewer.camera.setView({ destination: this.savedCamera.position, orientation: { direction: this.savedCamera.direction, up: this.savedCamera.up } })
     this.viewer.scene.screenSpaceCameraController.enableInputs = this.savedInputs
@@ -192,6 +202,7 @@ export class ExplorationController {
 
   destroy(): void {
     this.exit()
+    this.exploreCloudSystem.destroy()
     this.shipVisual.destroy(this.viewer)
   }
 
@@ -235,6 +246,10 @@ export class ExplorationController {
     const frameDelta = Math.max(0, Math.min((now - this.lastFrame) / 1000, 0.1))
     this.lastFrame = now
     this.syncToTarget(now)
+    if (now - this.lastCloudSettingsCheck >= CLOUD_SETTINGS_POLL_MS) {
+      this.lastCloudSettingsCheck = now
+      this.syncExploreCloudSettings(false)
+    }
     const interpolatedPosition = this.state.position
     const interpolatedOrientation = this.state.orientation
     const presentationSmoothing = 1 - Math.exp(-PRESENTATION_POSITION_FOLLOW * Math.max(frameDelta, 1 / 120))
@@ -250,6 +265,30 @@ export class ExplorationController {
     this.cameraRig.update(this.presentationPosition, this.presentationOrientation, this.state.velocity, frameDelta)
     this.emitHud(now)
     this.frameHandle = requestAnimationFrame(this.frame)
+  }
+
+  private syncExploreCloudSettings(forceStart: boolean): void {
+    if (!this.active) return
+    const enabled = localStorage.getItem('human-space-atlas.clouds-enabled') !== '0'
+    const savedOpacity = Number(localStorage.getItem('human-space-atlas.cloud-opacity-v3'))
+    const opacity = Number.isFinite(savedOpacity) ? Math.min(0.7, Math.max(0, savedOpacity)) : 0.5
+
+    if (!enabled) {
+      if (this.exploreCloudsRunning) this.exploreCloudSystem.stop()
+      this.exploreCloudsRunning = false
+      return
+    }
+
+    if (!this.exploreCloudsRunning || forceStart) {
+      this.exploreCloudsRunning = true
+      void this.exploreCloudSystem.start(opacity).catch((error) => {
+        this.exploreCloudsRunning = false
+        console.warn('[Human Space Atlas] NASA Explore cloud field unavailable', error)
+      })
+      return
+    }
+
+    this.exploreCloudSystem.setOpacity(opacity)
   }
 
   private syncToTarget(now: number): void {
