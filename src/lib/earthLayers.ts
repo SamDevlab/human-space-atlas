@@ -11,11 +11,12 @@ const NASA_GIBS_CLOUD_WMS_URL = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/be
 
 // Ignore very low confidence coverage. Keeping the low end transparent makes
 // the layer read as separate cloud systems instead of a white global veil.
-const CLOUD_MIN_FRACTION = 28
+const CLOUD_MIN_FRACTION = 34
 const CLOUD_FLOOR_ALPHA = 0
 const CLOUD_TEXTURE_WIDTH = 2048
 const CLOUD_TEXTURE_HEIGHT = 1024
-const CLOUD_EDGE_BLUR_PX = 9
+const CLOUD_EDGE_BLUR_PX = 3.5
+const CLOUD_CACHE_NAME = 'human-space-atlas-cloud-textures-v1'
 
 const CLOUD_PALETTE_TOLERANCE = 8
 const near = (actual: number, expected: number) => Math.abs(actual - expected) <= CLOUD_PALETTE_TOLERANCE
@@ -26,7 +27,7 @@ export function cloudAlphaFromRgb(red: number, green: number, blue: number): num
   if (fraction === null || fraction < CLOUD_MIN_FRACTION) return 0
   const coverage = Math.min(1, Math.max(0, (fraction - CLOUD_MIN_FRACTION) / (100 - CLOUD_MIN_FRACTION)))
   const featheredCoverage = coverage * coverage * (3 - 2 * coverage)
-  return Math.round((0.018 + featheredCoverage * 0.68) * 255)
+  return Math.round((0.006 + featheredCoverage * 0.48) * 255)
 }
 
 /** Preserve the published NASA GIBS palette helpers for catalog consumers. */
@@ -54,7 +55,7 @@ export function cloudFractionFromRgb(red: number, green: number, blue: number): 
 export function cloudAlphaFromFraction(fraction: number | null): number {
   if (fraction === null || fraction < CLOUD_MIN_FRACTION) return 0
   const coverage = Math.min(1, Math.max(0, (fraction - CLOUD_MIN_FRACTION) / (100 - CLOUD_MIN_FRACTION)))
-  return Math.round((0.008 + coverage * 0.27) * 255)
+  return Math.round((0.004 + coverage * 0.2) * 255)
 }
 
 function smoothstep(value: number): number {
@@ -93,11 +94,11 @@ function proceduralCloudAlpha(x: number, y: number): number {
   // Keep broad systems readable from low orbit, then let the higher
   // frequencies carve softer edges into them. The previous threshold made
   // most of the shell effectively transparent in Explore mode.
-  const cloudShape = smoothstep(Math.max(0, Math.min(1, (coverage - 0.39) / 0.23)))
+  const cloudShape = smoothstep(Math.max(0, Math.min(1, (coverage - 0.44) / 0.22)))
   const wispyDetail = smoothstep(Math.max(0, Math.min(1, (detail + fine * 0.5 - 0.38) / 0.34)))
   const latitude = y / CLOUD_TEXTURE_HEIGHT
   const bandWeight = 0.82 + 0.18 * Math.sin(latitude * Math.PI)
-  return Math.round(cloudShape * (42 + wispyDetail * 138) * bandWeight)
+  return Math.round(cloudShape * (16 + wispyDetail * 94) * bandWeight)
 }
 
 function renderCloudImage(width: number, height: number): HTMLCanvasElement {
@@ -152,6 +153,52 @@ export function createNasaCloudTexture(): HTMLCanvasElement {
   return softenCloudTexture(renderCloudImage(CLOUD_TEXTURE_WIDTH, CLOUD_TEXTURE_HEIGHT))
 }
 
+function cloudCacheKey(observationDate: string): string {
+  const origin = typeof window === 'undefined' ? 'https://human-space-atlas.invalid' : window.location.origin
+  return `${origin}/__hsa-cloud-cache/${observationDate}/${CLOUD_TEXTURE_WIDTH}x${CLOUD_TEXTURE_HEIGHT}.png`
+}
+
+async function canvasFromBlob(blob: Blob): Promise<HTMLCanvasElement> {
+  const bitmap = await createImageBitmap(blob)
+  const canvas = Object.assign(document.createElement('canvas'), { width: CLOUD_TEXTURE_WIDTH, height: CLOUD_TEXTURE_HEIGHT })
+  const context = canvas.getContext('2d')
+  if (!context) {
+    bitmap.close()
+    throw new Error('Cloud cache canvas unavailable')
+  }
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+  bitmap.close()
+  return canvas
+}
+
+function canvasBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+}
+
+async function readCachedCloudTexture(observationDate: string): Promise<HTMLCanvasElement | null> {
+  if (typeof caches === 'undefined') return null
+  try {
+    const cache = await caches.open(CLOUD_CACHE_NAME)
+    const response = await cache.match(cloudCacheKey(observationDate))
+    return response ? await canvasFromBlob(await response.blob()) : null
+  } catch {
+    return null
+  }
+}
+
+async function writeCachedCloudTexture(observationDate: string, canvas: HTMLCanvasElement): Promise<void> {
+  if (typeof caches === 'undefined') return
+  try {
+    const blob = await canvasBlob(canvas)
+    if (!blob) return
+    const cache = await caches.open(CLOUD_CACHE_NAME)
+    await cache.put(cloudCacheKey(observationDate), new Response(blob, { headers: { 'Content-Type': 'image/png' } }))
+  } catch {
+    // Private browsing and storage quotas can disable CacheStorage. The
+    // in-memory promise below still prevents duplicate work in this session.
+  }
+}
+
 function cloudObservationDate(): string {
   // GIBS products can arrive a day after acquisition; request a recent stable
   // composite instead of tying the visual layer to the simulated clock.
@@ -195,7 +242,9 @@ function trueColorMapUrl(observationDate = cloudObservationDate()): string {
 }
 
 /** Combine NASA's observed coverage with its true-color satellite texture. */
-export async function createNasaCloudTextureFromApi(observationDate = cloudObservationDate()): Promise<HTMLCanvasElement> {
+async function loadNasaCloudTextureFromApi(observationDate: string): Promise<HTMLCanvasElement> {
+  const cached = await readCachedCloudTexture(observationDate)
+  if (cached) return cached
   const [coverageResponse, trueColorResponse] = await Promise.all([
     fetch(cloudMapUrl(observationDate), { mode: 'cors' }),
     fetch(trueColorMapUrl(observationDate), { mode: 'cors' }),
@@ -234,9 +283,13 @@ export async function createNasaCloudTextureFromApi(observationDate = cloudObser
     // The coverage product is the source of truth for location. True color
     // only adds a soft density cue; using it as a hard gate made real cloud
     // systems disappear whenever the composite was dim or partially sampled.
-    const detail = smoothstep(Math.min(1, Math.max(0, (trueColorDetail - 0.12) / 0.52)))
+    const detail = smoothstep(Math.min(1, Math.max(0, (trueColorDetail - 0.2) / 0.52)))
     const noData = red + green + blue < 42
-    const alpha = noData ? 0 : Math.min(255, Math.round(realAlpha * (0.58 + detail * 0.42)))
+    // Keep low-confidence coverage as a feathered edge, but reserve the
+    // stronger alpha for bright, low-saturation formations. This prevents the
+    // global mask from becoming a uniform fog over the terrain.
+    const density = 0.12 + detail * 0.88
+    const alpha = noData ? 0 : Math.min(255, Math.round(realAlpha * density))
     // Render the observed formations as soft white cloud volume. The NASA
     // coverage mask supplies their location; the true-colour signal only
     // controls edge density so oceans do not become a blue veil.
@@ -246,7 +299,25 @@ export async function createNasaCloudTextureFromApi(observationDate = cloudObser
     pixels.data[index + 3] = alpha
   }
   context.putImageData(pixels, 0, 0)
-  return softenCloudTexture(canvas)
+  const softened = softenCloudTexture(canvas)
+  void writeCachedCloudTexture(observationDate, softened)
+  return softened
+}
+
+const cloudTexturePromises = new Map<string, Promise<HTMLCanvasElement>>()
+
+/** Start the daily cloud download early and reuse it across globe remounts. */
+export function preloadNasaCloudTexture(observationDate = cloudObservationDate()): Promise<HTMLCanvasElement> {
+  const cached = cloudTexturePromises.get(observationDate)
+  if (cached) return cached
+  const pending = loadNasaCloudTextureFromApi(observationDate)
+  cloudTexturePromises.set(observationDate, pending)
+  pending.catch(() => cloudTexturePromises.delete(observationDate))
+  return pending
+}
+
+export function createNasaCloudTextureFromApi(observationDate = cloudObservationDate()): Promise<HTMLCanvasElement> {
+  return preloadNasaCloudTexture(observationDate)
 }
 
 /** Create a soft, transparent and slightly varied sprite used for low-orbit cloud banks. */

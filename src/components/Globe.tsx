@@ -35,7 +35,7 @@ import {
   VelocityOrientationProperty,
 } from 'cesium'
 import { discoverMapStyles } from '../lib/mapStyles'
-import { createNasaCloudProvider, createNasaCloudTexture, createNasaCloudTextureFromApi, createNasaNightLightsProvider, NASA_GIBS_CLOUD_OBSERVATION_DATE } from '../lib/earthLayers'
+import { createNasaCloudProvider, createNasaCloudTexture, preloadNasaCloudTexture, createNasaNightLightsProvider, NASA_GIBS_CLOUD_OBSERVATION_DATE } from '../lib/earthLayers'
 import { eventColor } from '../lib/earthEvents'
 import type { EarthEvent } from '../lib/earthEvents'
 import type { OmmRecord } from '../lib/types'
@@ -491,7 +491,9 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     const shadowShell = cloudShadowsEnabled && !explorationActive ? createCloudShell(1_800, shadowMaterial) : null
     cloudShellRef.current = [cloudShell, highCloudShell, shadowShell].filter((shell): shell is Primitive => Boolean(shell))
     const cloudMotionStartedAt = performance.now()
-    createNasaCloudTextureFromApi().catch(() => fallbackCloudTexture).then((cloudTexture) => {
+    // The promise is shared by all globe remounts and backed by CacheStorage,
+    // so changing map mode does not restart the two large NASA downloads.
+    preloadNasaCloudTexture().catch(() => fallbackCloudTexture).then((cloudTexture) => {
       if (cancelled || viewer.isDestroyed()) return
       const cloudTextureUrl = cloudTexture.toDataURL('image/png')
       cloudMaterial.uniforms.image = cloudTextureUrl
