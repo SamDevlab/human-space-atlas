@@ -50,7 +50,7 @@ function App() {
   const [cloudOpacity, setCloudOpacity] = useState(() => {
     const savedValue = localStorage.getItem('human-space-atlas.cloud-opacity-v3')
     const saved = savedValue === null ? null : Number(savedValue)
-    return saved !== null && Number.isFinite(saved) ? Math.min(0.7, Math.max(0, saved)) : 0.5
+    return saved !== null && Number.isFinite(saved) ? Math.min(1, Math.max(0, saved)) : 0.75
   })
   const [cloudShadowsEnabled, setCloudShadowsEnabled] = useState(() => localStorage.getItem('human-space-atlas.cloud-shadows-enabled') !== '0')
   const [atmosphereEnabled, setAtmosphereEnabled] = useState(() => localStorage.getItem('human-space-atlas.atmosphere-enabled') !== '0')
