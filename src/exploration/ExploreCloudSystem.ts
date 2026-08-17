@@ -3,17 +3,25 @@ import {
   Cartesian2,
   Cartesian3,
   Color,
+  ImageryLayer,
   Viewer,
 } from 'cesium'
-import { preloadNasaCloudTexture } from '../lib/earthLayers'
+import {
+  createNasaCloudProvider,
+  NASA_GIBS_CLOUD_OBSERVATION_DATE,
+  preloadNasaCloudTexture,
+} from '../lib/earthLayers'
 
-const CLOUD_COLLECTION_NOISE_DETAIL = 32
-const CLOUD_REGION_STEP_DEGREES = 1.35
-const CLOUD_REGION_REBUILD_DEGREES = 2.5
-const CLOUD_REGION_MAX_RADIUS_DEGREES = 24
-const CLOUD_REGION_MIN_RADIUS_DEGREES = 10
-const CLOUD_MAX_COUNT = 620
+const CLOUD_COLLECTION_NOISE_DETAIL = 20
+const CLOUD_REGION_STEP_DEGREES = 2.4
+const CLOUD_REGION_REBUILD_DEGREES = 3.2
+const CLOUD_REGION_MAX_RADIUS_DEGREES = 16
+const CLOUD_REGION_MIN_RADIUS_DEGREES = 7
+const CLOUD_MAX_COUNT = 240
 const CLOUD_ALPHA_REFERENCE = 0.48
+const CLOUD_VOLUME_FULL_BELOW_METERS = 180_000
+const CLOUD_VOLUME_OFF_ABOVE_METERS = 300_000
+const CLOUD_FAR_FIELD_MAX_ALPHA = 0.78
 
 export const EXPLORE_CLOUD_DISCLOSURE = 'NASA observed cloud field · cinematic 3D reconstruction'
 
@@ -72,21 +80,29 @@ export function wrapCloudLongitude(longitudeDeg: number): number {
   return ((longitudeDeg + 180) % 360 + 360) % 360 - 180
 }
 
+/**
+ * Cinematic volumes are a low-orbit detail layer, not the global cloud map.
+ * They stay fully visible below 180 km and fade out by 300 km. This prevents
+ * the isolated "snowball" look that appears when individual CumulusCloud
+ * volumes are viewed from hundreds of kilometres away.
+ */
 export function exploreCloudVolumeFade(cameraHeightMeters: number): number {
-  // Full volumetric clouds through low orbit, then gracefully hand off to the
-  // global NASA imagery layer before the camera gets far enough away that
-  // hundreds of 3D cloud volumes add no useful parallax.
-  return 1 - smoothstep01((cameraHeightMeters - 550_000) / 900_000)
+  const range = CLOUD_VOLUME_OFF_ABOVE_METERS - CLOUD_VOLUME_FULL_BELOW_METERS
+  return 1 - smoothstep01((cameraHeightMeters - CLOUD_VOLUME_FULL_BELOW_METERS) / range)
 }
 
+/**
+ * The NASA-derived 2D field is the far-orbit representation. It crossfades
+ * inversely with the local 3D reconstruction so the Explore camera sees one
+ * continuous weather system instead of either a flat decal or floating dots.
+ */
 export function exploreCloudMapFade(cameraHeightMeters: number): number {
-  // In Explore the flat NASA map is only a far-field macro layer. Below this
-  // range it fades away so the spacecraft never flies through a painted mask.
-  return smoothstep01((cameraHeightMeters - 420_000) / 520_000)
+  const range = CLOUD_VOLUME_OFF_ABOVE_METERS - CLOUD_VOLUME_FULL_BELOW_METERS
+  return smoothstep01((cameraHeightMeters - CLOUD_VOLUME_FULL_BELOW_METERS) / range)
 }
 
 export function exploreCloudRadiusDegrees(cameraHeightMeters: number): number {
-  return clamp(10 + cameraHeightMeters / 65_000, CLOUD_REGION_MIN_RADIUS_DEGREES, CLOUD_REGION_MAX_RADIUS_DEGREES)
+  return clamp(7 + cameraHeightMeters / 80_000, CLOUD_REGION_MIN_RADIUS_DEGREES, CLOUD_REGION_MAX_RADIUS_DEGREES)
 }
 
 export function createCanvasCloudAlphaSampler(texture: HTMLCanvasElement): CloudAlphaSampler {
@@ -106,12 +122,14 @@ function localCloudCoverage(sampleAlpha: CloudAlphaSampler, longitudeDeg: number
   let coverage = 0
   const offsets = [
     [0, 0],
-    [-0.42, 0],
-    [0.42, 0],
-    [0, -0.42],
-    [0, 0.42],
-    [-0.28, -0.28],
-    [0.28, 0.28],
+    [-0.7, 0],
+    [0.7, 0],
+    [0, -0.7],
+    [0, 0.7],
+    [-0.48, -0.48],
+    [0.48, 0.48],
+    [-0.48, 0.48],
+    [0.48, -0.48],
   ] as const
   for (const [longitudeOffset, latitudeOffset] of offsets) {
     coverage = Math.max(coverage, sampleAlpha(longitudeDeg + longitudeOffset, latitudeDeg + latitudeOffset))
@@ -119,6 +137,11 @@ function localCloudCoverage(sampleAlpha: CloudAlphaSampler, longitudeDeg: number
   return clamp(coverage / CLOUD_ALPHA_REFERENCE, 0, 1)
 }
 
+/**
+ * Convert the observed NASA mask into broad, overlapping cloud banks.
+ * A coarser geographic grid plus several overlapping lobes per strong cell
+ * reads as fronts/systems from low orbit instead of hundreds of tiny dots.
+ */
 export function createExploreCloudSeeds(
   centerLongitudeDeg: number,
   centerLatitudeDeg: number,
@@ -139,29 +162,34 @@ export function createExploreCloudSeeds(
     for (let longitude = startLongitude; longitude <= endLongitude && seeds.length < maxClouds; longitude += CLOUD_REGION_STEP_DEGREES) {
       const wrappedLongitude = wrapCloudLongitude(longitude)
       const coverage = localCloudCoverage(sampleAlpha, wrappedLongitude, latitude)
-      if (coverage < 0.07) continue
+      if (coverage < 0.12) continue
 
       const cellX = Math.round(wrappedLongitude / CLOUD_REGION_STEP_DEGREES)
       const cellY = Math.round(latitude / CLOUD_REGION_STEP_DEGREES)
-      const keepChance = clamp(0.08 + coverage * 0.92, 0, 0.96)
+      const keepChance = clamp(0.12 + coverage * 0.82, 0, 0.9)
       if (hash01(cellX + 17, cellY + 29) > keepChance) continue
 
-      const clusterCount = coverage > 0.72 ? 3 : coverage > 0.34 ? 2 : 1
+      const clusterCount = coverage > 0.74 ? 4 : coverage > 0.42 ? 3 : 2
       const latitudeCosine = Math.max(0.28, Math.cos(latitude * Math.PI / 180))
       for (let clusterIndex = 0; clusterIndex < clusterCount && seeds.length < maxClouds; clusterIndex += 1) {
         const jitterX = hash01(cellX * 13 + clusterIndex * 7 + 3, cellY * 11 + 5) - 0.5
         const jitterY = hash01(cellX * 17 + 9, cellY * 19 + clusterIndex * 13 + 7) - 0.5
-        const longitudeJitter = jitterX * CLOUD_REGION_STEP_DEGREES * 0.86 / latitudeCosine
-        const latitudeJitter = jitterY * CLOUD_REGION_STEP_DEGREES * 0.72
+        // Keep lobes close enough to overlap. This makes each observed cell a
+        // cloud bank rather than a collection of unrelated points.
+        const longitudeJitter = jitterX * CLOUD_REGION_STEP_DEGREES * 0.42 / latitudeCosine
+        const latitudeJitter = jitterY * CLOUD_REGION_STEP_DEGREES * 0.36
         const shapeNoise = hash01(cellX * 23 + clusterIndex * 31 + 11, cellY * 29 + 17)
         const heightNoise = hash01(cellX * 37 + 19, cellY * 41 + clusterIndex * 43 + 23)
         const aspectNoise = hash01(cellX * 47 + clusterIndex * 53 + 29, cellY * 59 + 31)
 
-        const horizontalBase = 28_000 + coverage * 82_000
-        const scaleX = horizontalBase * (0.78 + shapeNoise * 0.62)
-        const scaleY = scaleX * (0.48 + aspectNoise * 0.42)
-        const baseAltitude = 1_400 + heightNoise * 3_600
-        const depthMeters = 2_800 + coverage * 7_800 + shapeNoise * 2_600
+        // Broad macro-scale lobes are intentional: at 120–250 km the camera
+        // reads them as continuous weather systems with parallax, while the
+        // NASA mask still determines where those systems may exist.
+        const horizontalBase = 72_000 + coverage * 155_000
+        const scaleX = horizontalBase * (0.82 + shapeNoise * 0.38)
+        const scaleY = scaleX * (0.58 + aspectNoise * 0.3)
+        const baseAltitude = 1_600 + heightNoise * 4_200
+        const depthMeters = 5_000 + coverage * 9_500 + shapeNoise * 3_500
         const altitudeMeters = baseAltitude + depthMeters * 0.5
 
         seeds.push({
@@ -171,9 +199,9 @@ export function createExploreCloudSeeds(
           scaleX,
           scaleY,
           depthMeters,
-          slice: 0.34 + hash01(cellX * 61 + clusterIndex * 67 + 37, cellY * 71 + 41) * 0.28,
-          brightness: 0.72 + coverage * 0.22 + heightNoise * 0.06,
-          alpha: clamp(0.38 + coverage * 0.52, 0.38, 0.92),
+          slice: 0.42 + hash01(cellX * 61 + clusterIndex * 67 + 37, cellY * 71 + 41) * 0.18,
+          brightness: 0.7 + coverage * 0.18 + heightNoise * 0.06,
+          alpha: clamp(0.28 + coverage * 0.46, 0.28, 0.76),
         })
       }
     }
@@ -189,6 +217,7 @@ function angularDistanceDegrees(left: number, right: number): number {
 export class ExploreCloudSystem {
   private readonly viewer: Viewer
   private collection: CloudCollectionLike | null = null
+  private farFieldLayer: ImageryLayer | null = null
   private sampleAlpha: CloudAlphaSampler | null = null
   private running = false
   private destroyed = false
@@ -217,10 +246,23 @@ export class ExploreCloudSystem {
       this.collection.show = false
     }
 
-    if (!this.sampleAlpha) {
+    if (!this.sampleAlpha || !this.farFieldLayer) {
       const texture = await preloadNasaCloudTexture()
       if (this.destroyed || generation !== this.loadGeneration || this.viewer.isDestroyed()) return
       this.sampleAlpha = createCanvasCloudAlphaSampler(texture)
+
+      if (!this.farFieldLayer) {
+        const provider = await createNasaCloudProvider(NASA_GIBS_CLOUD_OBSERVATION_DATE, texture)
+        if (this.destroyed || generation !== this.loadGeneration || this.viewer.isDestroyed()) return
+        const layer = this.viewer.imageryLayers.addImageryProvider(provider)
+        layer.alpha = 0
+        layer.brightness = 1.04
+        layer.contrast = 1.08
+        layer.saturation = 0.9
+        layer.show = false
+        this.viewer.imageryLayers.raiseToTop(layer)
+        this.farFieldLayer = layer
+      }
     }
 
     if (!this.running) {
@@ -246,6 +288,10 @@ export class ExploreCloudSystem {
       this.collection.show = false
       this.collection.removeAll()
     }
+    if (this.farFieldLayer && !this.viewer.isDestroyed()) {
+      this.viewer.imageryLayers.remove(this.farFieldLayer, false)
+    }
+    this.farFieldLayer = null
     this.lastLongitudeDeg = null
     this.lastLatitudeDeg = null
     this.lastAltitudeBucket = -1
@@ -268,15 +314,22 @@ export class ExploreCloudSystem {
     const latitudeDeg = cartographic.latitude * 180 / Math.PI
     const altitudeMeters = Math.max(0, cartographic.height)
     const volumeFade = exploreCloudVolumeFade(altitudeMeters)
+    const mapFade = exploreCloudMapFade(altitudeMeters)
+
+    if (this.farFieldLayer) {
+      this.farFieldLayer.alpha = clamp(this.opacity * mapFade * CLOUD_FAR_FIELD_MAX_ALPHA, 0, CLOUD_FAR_FIELD_MAX_ALPHA)
+      this.farFieldLayer.show = mapFade > 0.01 && this.farFieldLayer.alpha > 0.005
+    }
+
     this.collection.show = volumeFade > 0.015
     if (!this.collection.show) return
 
-    const altitudeBucket = Math.floor(altitudeMeters / 180_000)
+    const altitudeBucket = Math.floor(altitudeMeters / 60_000)
     const movedFarEnough = this.lastLongitudeDeg === null
       || this.lastLatitudeDeg === null
       || angularDistanceDegrees(longitudeDeg, this.lastLongitudeDeg) >= CLOUD_REGION_REBUILD_DEGREES
       || Math.abs(latitudeDeg - this.lastLatitudeDeg) >= CLOUD_REGION_REBUILD_DEGREES
-    const fadeChanged = this.lastVolumeFade < 0 || Math.abs(volumeFade - this.lastVolumeFade) >= 0.12
+    const fadeChanged = this.lastVolumeFade < 0 || Math.abs(volumeFade - this.lastVolumeFade) >= 0.1
     if (movedFarEnough || altitudeBucket !== this.lastAltitudeBucket || fadeChanged) this.rebuild(false)
   }
 
@@ -287,9 +340,21 @@ export class ExploreCloudSystem {
     const latitudeDeg = cartographic.latitude * 180 / Math.PI
     const altitudeMeters = Math.max(0, cartographic.height)
     const volumeFade = exploreCloudVolumeFade(altitudeMeters)
+    const mapFade = exploreCloudMapFade(altitudeMeters)
 
-    if (!force && volumeFade <= 0.015) {
+    if (this.farFieldLayer) {
+      this.farFieldLayer.alpha = clamp(this.opacity * mapFade * CLOUD_FAR_FIELD_MAX_ALPHA, 0, CLOUD_FAR_FIELD_MAX_ALPHA)
+      this.farFieldLayer.show = mapFade > 0.01 && this.farFieldLayer.alpha > 0.005
+    }
+
+    if (volumeFade <= 0.015) {
       this.collection.show = false
+      this.collection.removeAll()
+      this.lastLongitudeDeg = longitudeDeg
+      this.lastLatitudeDeg = latitudeDeg
+      this.lastAltitudeBucket = Math.floor(altitudeMeters / 60_000)
+      this.lastVolumeFade = volumeFade
+      this.viewer.scene.requestRender()
       return
     }
 
@@ -302,17 +367,17 @@ export class ExploreCloudSystem {
       this.collection.add({
         position: Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.altitudeMeters),
         scale: new Cartesian2(seed.scaleX, seed.scaleY),
-        maximumSize: new Cartesian3(seed.scaleX * 0.88, seed.scaleY * 0.88, seed.depthMeters),
+        maximumSize: new Cartesian3(seed.scaleX, seed.scaleY, seed.depthMeters),
         slice: seed.slice,
         brightness: seed.brightness,
-        color: Color.WHITE.withAlpha(clamp(seed.alpha * renderedAlpha, 0, 0.94)),
+        color: Color.fromCssColorString('#f3f7fb').withAlpha(clamp(seed.alpha * renderedAlpha, 0, 0.72)),
       })
     }
 
     this.collection.show = seeds.length > 0 && volumeFade > 0.015
     this.lastLongitudeDeg = longitudeDeg
     this.lastLatitudeDeg = latitudeDeg
-    this.lastAltitudeBucket = Math.floor(altitudeMeters / 180_000)
+    this.lastAltitudeBucket = Math.floor(altitudeMeters / 60_000)
     this.lastVolumeFade = volumeFade
     this.viewer.scene.requestRender()
   }
