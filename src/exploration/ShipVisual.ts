@@ -2,12 +2,17 @@ import {
   BoxGeometry,
   Cartesian3,
   Color,
+  ColorBlendMode,
   ColorGeometryInstanceAttribute,
+  ConstantPositionProperty,
+  ConstantProperty,
+  Entity,
   EllipsoidGeometry,
   GeometryInstance,
   Matrix3,
   Matrix4,
   Material,
+  ModelGraphics,
   PerInstanceColorAppearance,
   PointPrimitive,
   PointPrimitiveCollection,
@@ -16,6 +21,7 @@ import {
   Polyline,
   PolylineCollection,
   Quaternion,
+  ShadowMode,
   Viewer,
 } from 'cesium'
 import { getShipBasis } from './flightModel'
@@ -52,6 +58,9 @@ export class ShipVisual {
   private readonly trailCollection: PolylineCollection
   private readonly trails: Polyline[] = []
   private readonly trailMaterials: Material[] = []
+  private readonly modelEntity: Entity
+  private readonly modelPosition: ConstantPositionProperty
+  private readonly modelOrientation: ConstantProperty
   private visible = false
 
   constructor(viewer: Viewer) {
@@ -90,12 +99,36 @@ export class ShipVisual {
       this.trailMaterials.push(material)
       this.trails.push(this.trailCollection.add({ positions: [Cartesian3.ZERO, Cartesian3.ZERO], width: 4, material, show: false }))
     }
+
+    this.modelPosition = new ConstantPositionProperty(Cartesian3.ZERO)
+    this.modelOrientation = new ConstantProperty(Quaternion.IDENTITY)
+    this.modelEntity = viewer.entities.add(new Entity({
+      name: 'HSA Explorer · Voyager probe',
+      show: false,
+      position: this.modelPosition,
+      orientation: this.modelOrientation,
+      model: new ModelGraphics({
+        scale: new ConstantProperty(58),
+        minimumPixelSize: new ConstantProperty(120),
+        // Voyager Probe (B) includes embedded NASA texture images and PBR
+        // materials. Keep the model's original painted/gold/black livery.
+        uri: new ConstantProperty('/assets/voyager-probe-b.glb'),
+        color: new ConstantProperty(Color.WHITE),
+        colorBlendMode: new ConstantProperty(ColorBlendMode.MIX),
+        colorBlendAmount: new ConstantProperty(0),
+        runAnimations: new ConstantProperty(false),
+        shadows: new ConstantProperty(ShadowMode.ENABLED),
+      }),
+    }))
   }
 
   update(position: Cartesian3, orientation: Quaternion, snapshot: ShipVisualSnapshot): void {
     const rotation = Matrix3.fromQuaternion(orientation, new Matrix3())
     const shipMatrix = Matrix4.fromRotationTranslation(rotation, position, new Matrix4())
     for (const component of this.components) Matrix4.multiply(shipMatrix, component.localMatrix, component.primitive.modelMatrix)
+    this.modelPosition.setValue(position)
+    this.modelOrientation.setValue(orientation)
+    this.modelEntity.show = this.visible
 
     const enginePositions = ENGINE_OFFSETS.map((offset) => Matrix4.multiplyByPoint(shipMatrix, offset, new Cartesian3()))
     const forward = getShipBasis(orientation).forward
@@ -111,19 +144,24 @@ export class ShipVisual {
       this.trails[i].width = 2 + Math.abs(snapshot.throttle) * 4 + (snapshot.boost ? 3 : 0)
     }
     for (const material of this.trailMaterials) material.uniforms.color = engineColor.withAlpha(snapshot.boost ? 0.85 : 0.45)
-    this.collection.show = this.visible
   }
 
   setVisible(visible: boolean): void {
     this.visible = visible
+    this.setProceduralVisible(false)
+    this.modelEntity.show = visible
+  }
+
+  destroy(viewer: Viewer): void {
+    viewer.entities.remove(this.modelEntity)
+    viewer.scene.primitives.remove(this.collection)
+  }
+
+  private setProceduralVisible(visible: boolean): void {
     this.collection.show = visible
     for (const component of this.components) component.primitive.show = visible
     for (const engine of this.enginePrimitives) engine.show = visible
     for (const trail of this.trails) trail.show = visible
-  }
-
-  destroy(viewer: Viewer): void {
-    viewer.scene.primitives.remove(this.collection)
   }
 
   private addBox(dimensions: Cartesian3, translation: Cartesian3, color: Color, rotation = Quaternion.IDENTITY): void {

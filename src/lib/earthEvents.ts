@@ -35,16 +35,16 @@ export interface EarthEvent {
 }
 
 export const EARTH_EVENT_CATEGORIES = [
-  { id: 'severeStorms', label: 'Severe Storms' },
-  { id: 'wildfires', label: 'Wildfires' },
-  { id: 'floods', label: 'Floods' },
-  { id: 'drought', label: 'Drought' },
-  { id: 'dustHaze', label: 'Dust / Haze' },
-  { id: 'tempExtremes', label: 'Temperature Extremes' },
-  { id: 'snow', label: 'Snow / Ice' },
-  { id: 'volcanoes', label: 'Volcanoes' },
-  { id: 'earthquakes', label: 'Earthquakes' },
-  { id: 'landslides', label: 'Landslides' },
+  { id: 'severeStorms', label: 'Tempestades severas' },
+  { id: 'wildfires', label: 'Incêndios' },
+  { id: 'floods', label: 'Inundações' },
+  { id: 'drought', label: 'Secas' },
+  { id: 'dustHaze', label: 'Poeira / neblina' },
+  { id: 'tempExtremes', label: 'Temperaturas extremas' },
+  { id: 'snow', label: 'Neve / gelo' },
+  { id: 'volcanoes', label: 'Vulcões' },
+  { id: 'earthquakes', label: 'Terremotos' },
+  { id: 'landslides', label: 'Deslizamentos' },
 ] as const
 
 function pointCoordinates(value: unknown): [number, number] | null {
@@ -64,6 +64,7 @@ export function normalizeEarthEvents(rawEvents: RawEarthEvent[]): EarthEvent[] {
     const geometry = [...(event.geometry ?? event.geometries ?? [])].reverse().find((item) => item.type === 'Point' || item.type === 'Polygon')
     if (!geometry) return []
     const category = event.categories?.[0]
+    const categoryDefinition = EARTH_EVENT_CATEGORIES.find((item) => item.id === category?.id)
     const point = geometry.type === 'Point' ? pointCoordinates(geometry.coordinates) : null
     const polygon = geometry.type === 'Polygon' ? polygonCoordinates(geometry.coordinates) : null
     if (!point && !polygon) return []
@@ -73,7 +74,7 @@ export function normalizeEarthEvents(rawEvents: RawEarthEvent[]): EarthEvent[] {
       description: event.description ?? null,
       link: event.link ?? null,
       categoryId: category?.id ?? 'other',
-      categoryTitle: category?.title ?? 'Other',
+      categoryTitle: categoryDefinition?.label ?? category?.title ?? 'Outro',
       source: event.sources?.[0]?.id ?? null,
       magnitudeValue: typeof geometry.magnitudeValue === 'number' ? geometry.magnitudeValue : null,
       magnitudeUnit: geometry.magnitudeUnit ?? null,

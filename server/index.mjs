@@ -4,6 +4,7 @@ import { URL, pathToFileURL } from 'node:url'
 const PORT = Number(process.env.PORT ?? 8787)
 const CACHE_TTL_MS = 2 * 60 * 60 * 1000
 const EVENT_CACHE_TTL_MS = 15 * 60 * 1000
+const AIRCRAFT_CACHE_TTL_MS = 15 * 1000
 const CATALOG_GROUPS = new Set(['stations', 'active', 'starlink', 'gps-ops'])
 const EONET_STATUSES = new Set(['open', 'closed', 'all'])
 const cache = new Map()
@@ -115,6 +116,46 @@ async function handleEarthEvents(url, res) {
   })
 }
 
+function normalizeAircraftStates(payload, limit) {
+  const states = Array.isArray(payload?.states) ? payload.states : []
+  return states
+    .filter((state) => Array.isArray(state) && typeof state[0] === 'string' && Number.isFinite(state[5]) && Number.isFinite(state[6]))
+    .map((state) => {
+      const altitudeMeters = Number.isFinite(state[13]) ? state[13] : state[7]
+      return {
+        icao24: state[0].trim().toLowerCase(),
+        callsign: typeof state[1] === 'string' ? state[1].trim() || null : null,
+        originCountry: typeof state[2] === 'string' ? state[2] : null,
+        longitudeDeg: state[5],
+        latitudeDeg: state[6],
+        altitudeMeters,
+        velocityMetersPerSecond: state[9],
+        trueTrackDeg: Number.isFinite(state[10]) ? state[10] : null,
+        verticalRateMetersPerSecond: Number.isFinite(state[11]) ? state[11] : 0,
+        lastContact: state[4],
+        category: Number.isFinite(state[17]) ? state[17] : null,
+        onGround: state[8] === true,
+      }
+    })
+    .filter((state) => !state.onGround && Number.isFinite(state.altitudeMeters) && state.altitudeMeters >= 500 && state.altitudeMeters <= 20_000 && Number.isFinite(state.velocityMetersPerSecond) && state.velocityMetersPerSecond >= 20 && Number.isFinite(state.lastContact))
+    .sort((a, b) => b.altitudeMeters - a.altitudeMeters)
+    .slice(0, limit)
+    .map(({ onGround: _onGround, ...state }) => state)
+}
+
+async function handleAircraftStates(url, res) {
+  const rawLimit = Number(url.searchParams.get('limit') ?? 180)
+  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, Math.floor(rawLimit))) : 180
+  const upstream = 'https://opensky-network.org/api/states/all?extended=1'
+  const result = await fetchWithCache('opensky:states:all', upstream, AIRCRAFT_CACHE_TTL_MS)
+  return json(res, 200, {
+    source: 'opensky',
+    fetchedAt: result.fetchedAt,
+    cache: result.cache,
+    states: normalizeAircraftStates(result.value, limit),
+  })
+}
+
 export function createApp() {
   return http.createServer(async (req, res) => {
   if (!req.url) return json(res, 400, { error: 'Missing URL' })
@@ -131,12 +172,13 @@ export function createApp() {
   const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
 
   try {
-    if (req.method === 'GET' && url.pathname === '/health') {
+    if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/api/health')) {
       return json(res, 200, { ok: true, service: 'human-space-atlas-api', now: new Date().toISOString() })
     }
     if (req.method === 'GET' && url.pathname === '/api/catalog') return await handleCatalog(url, res)
     if (req.method === 'GET' && url.pathname === '/api/horizons') return await handleHorizons(url, res)
     if (req.method === 'GET' && url.pathname === '/api/earth/events') return await handleEarthEvents(url, res)
+    if (req.method === 'GET' && url.pathname === '/api/aircraft/states') return await handleAircraftStates(url, res)
     return json(res, 404, { error: 'Not found' })
   } catch (error) {
     console.error(error)

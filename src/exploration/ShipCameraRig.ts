@@ -1,11 +1,13 @@
 import { Cartesian3, Ellipsoid, Matrix3, Quaternion, Viewer } from 'cesium'
+import { getShipBasis } from './flightModel'
+import type { ExplorationCameraPreset } from './types'
 
-export const MIN_CAMERA_DISTANCE_METERS = 3_500
-export const DEFAULT_CAMERA_DISTANCE_METERS = 7_500
+export const MIN_CAMERA_DISTANCE_METERS = 2_800
+export const DEFAULT_CAMERA_DISTANCE_METERS = 5_200
 export const MAX_CAMERA_DISTANCE_METERS = 50_000
 export const MIN_CAMERA_PITCH = -Math.PI * 0.47
 export const MAX_CAMERA_PITCH = Math.PI * 0.47
-export const DEFAULT_CAMERA_PITCH = 0.28
+export const DEFAULT_CAMERA_PITCH = 0.18
 
 export interface CameraOrbitState {
   yaw: number
@@ -33,23 +35,68 @@ export function applyCameraZoom(state: CameraOrbitState, deltaY: number): Camera
   return { ...state, distance: clampCameraDistance(state.distance * Math.exp(deltaY * 0.001)) }
 }
 
-function damp(current: number, target: number, strength: number, deltaSeconds: number): number {
-  return current + (target - current) * (1 - Math.exp(-strength * deltaSeconds))
+function normalizeOrFallback(vector: Cartesian3, fallback: Cartesian3, result = new Cartesian3()): Cartesian3 {
+  const magnitude = Cartesian3.magnitude(vector)
+  if (!Number.isFinite(magnitude) || magnitude < 0.0001) return Cartesian3.clone(fallback, result)
+  return Cartesian3.divideByScalar(vector, magnitude, result)
+}
+
+function stableCameraUp(direction: Cartesian3, rollUp: Cartesian3, fallback: Cartesian3, result = new Cartesian3(), projectedUp = new Cartesian3()): Cartesian3 {
+  Cartesian3.multiplyByScalar(direction, Cartesian3.dot(rollUp, direction), projectedUp)
+  Cartesian3.subtract(rollUp, projectedUp, projectedUp)
+  const up = normalizeOrFallback(projectedUp, fallback, result)
+  // Keep the same hemisphere as the previous frame. Without this guard, a
+  // near-antiparallel lerp can briefly pass through zero and flip the camera.
+  return Cartesian3.dot(up, fallback) >= 0 ? up : Cartesian3.negate(up, up)
 }
 
 export class ShipCameraRig {
   private readonly viewer: Viewer
   private actualPosition: Cartesian3 | null = null
   private actualUp: Cartesian3 | null = null
-  private idleSeconds = 0
+  private actualLookAhead: number | null = null
+  private actualLookTarget: Cartesian3 | null = null
+  private followOrientation = Quaternion.IDENTITY.clone()
   private orbiting = false
+  private cameraDetached = false
   private entered = false
+  private referenceForward = Cartesian3.UNIT_X.clone()
+  private referenceRight = Cartesian3.UNIT_Y.clone()
+  private referenceUp = Cartesian3.UNIT_Z.clone()
+  private latestForward = Cartesian3.UNIT_X.clone()
+  private latestRight = Cartesian3.UNIT_Y.clone()
+  private latestUp = Cartesian3.UNIT_Z.clone()
+  // Reuse the camera math buffers every render frame. Explore owns the camera
+  // loop, so allocating a dozen Cartesian3/Matrix3 objects per frame made
+  // garbage collection visible as tiny camera hitches on slower GPUs.
+  private readonly targetFrame = new Matrix3()
+  private readonly orbitOffset = new Cartesian3()
+  private readonly orbitForward = new Cartesian3()
+  private readonly orbitRight = new Cartesian3()
+  private readonly orbitUp = new Cartesian3()
+  private readonly earthUp = new Cartesian3()
+  private readonly desiredPosition = new Cartesian3()
+  private readonly desiredLookTarget = new Cartesian3()
+  private readonly lookAheadOffset = new Cartesian3()
+  private readonly rollBlend = new Cartesian3()
+  private readonly rollUp = new Cartesian3()
+  private readonly currentDirection = new Cartesian3()
+  private readonly desiredUp = new Cartesian3()
+  private readonly blendedUp = new Cartesian3()
+  private readonly finalDirection = new Cartesian3()
+  private readonly projectedUp = new Cartesian3()
 
   readonly state: CameraOrbitState = { yaw: 0, pitch: DEFAULT_CAMERA_PITCH, distance: DEFAULT_CAMERA_DISTANCE_METERS }
-  followStrength = 5.5
-  lookAhead = 4_500
-  rollInfluence = 0.28
-  autoRecenterDelay = 2.2
+  followStrength = 3.6
+  // The followed object's attitude can make tiny corrections every frame. The
+  // camera follows a slower orientation envelope so those corrections remain invisible.
+  orientationFollowStrength = 2.2
+  // Keep the spacecraft itself in the cinematic frame while still giving
+  // the flight path a small amount of forward bias at orbital velocity.
+  lookAhead = 420
+  // Keep the orbital horizon steady; spacecraft roll should not unexpectedly
+  // roll the entire camera view with it.
+  rollInfluence = 0.1
   orbitSensitivity = 0.004
 
   constructor(viewer: Viewer) {
@@ -62,8 +109,11 @@ export class ShipCameraRig {
     this.state.distance = DEFAULT_CAMERA_DISTANCE_METERS
     this.actualPosition = null
     this.actualUp = null
-    this.idleSeconds = 0
+    this.actualLookAhead = null
+    this.actualLookTarget = null
+    this.followOrientation = orientation.clone()
     this.orbiting = false
+    this.cameraDetached = false
     this.entered = true
     this.update(position, orientation, Cartesian3.ZERO, 0)
   }
@@ -72,35 +122,61 @@ export class ShipCameraRig {
     this.entered = false
     this.actualPosition = null
     this.actualUp = null
+    this.actualLookAhead = null
+    this.actualLookTarget = null
     this.orbiting = false
+    this.cameraDetached = false
   }
 
   beginOrbit(): void {
     this.orbiting = true
-    this.idleSeconds = 0
+    this.cameraDetached = true
+    this.referenceForward = this.latestForward.clone()
+    this.referenceRight = this.latestRight.clone()
+    this.referenceUp = this.latestUp.clone()
   }
 
   endOrbit(): void {
     this.orbiting = false
-    this.idleSeconds = 0
   }
 
   orbit(deltaX: number, deltaY: number): void {
     const next = applyCameraOrbit(this.state, deltaX, deltaY, this.orbitSensitivity)
     this.state.yaw = next.yaw
     this.state.pitch = next.pitch
-    this.idleSeconds = 0
   }
 
   zoom(deltaY: number): void {
     this.state.distance = applyCameraZoom(this.state, deltaY).distance
-    this.idleSeconds = 0
   }
 
   recenter(): void {
     this.state.yaw = 0
     this.state.pitch = DEFAULT_CAMERA_PITCH
-    this.idleSeconds = 0
+    this.cameraDetached = false
+  }
+
+  setPreset(preset: ExplorationCameraPreset): void {
+    this.cameraDetached = false
+    this.orbiting = false
+    if (preset === 'ASTRONAUT') {
+      this.state.distance = 3_400
+      this.state.pitch = 0.06
+      this.lookAhead = 120
+      this.rollInfluence = 0.04
+      return
+    }
+    if (preset === 'ORBIT') {
+      this.state.distance = 13_000
+      this.state.pitch = 0.22
+      this.lookAhead = 360
+      this.rollInfluence = 0.08
+      return
+    }
+    this.state.distance = DEFAULT_CAMERA_DISTANCE_METERS
+    this.state.pitch = DEFAULT_CAMERA_PITCH
+    this.lookAhead = 420
+    this.rollInfluence = 0.1
   }
 
   isOrbiting(): boolean {
@@ -114,44 +190,71 @@ export class ShipCameraRig {
   update(position: Cartesian3, orientation: Quaternion, velocity: Cartesian3, deltaSeconds: number): void {
     if (!this.entered) return
     const dt = Math.max(0, Math.min(deltaSeconds, 0.1))
-    if (!this.orbiting) {
-      this.idleSeconds += dt
-      if (this.idleSeconds > this.autoRecenterDelay) {
-        this.state.yaw = damp(this.state.yaw, 0, 1.35, dt)
-        this.state.pitch = damp(this.state.pitch, DEFAULT_CAMERA_PITCH, 1.35, dt)
-      }
-    }
 
-    const rotation = Matrix3.fromQuaternion(orientation, new Matrix3())
-    const forward = Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_X, new Cartesian3())
-    const right = Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_Y, new Cartesian3())
-    const shipUp = Matrix3.multiplyByVector(rotation, Cartesian3.UNIT_Z, new Cartesian3())
-    const earthUp = Ellipsoid.WGS84.geodeticSurfaceNormal(position, new Cartesian3())
+    const shipBasis = getShipBasis(orientation)
+    const targetFrame = this.targetFrame
+    Matrix3.setColumn(targetFrame, 0, shipBasis.forward, targetFrame)
+    Matrix3.setColumn(targetFrame, 1, shipBasis.right, targetFrame)
+    Matrix3.setColumn(targetFrame, 2, shipBasis.up, targetFrame)
+    const targetFollowOrientation = Quaternion.fromRotationMatrix(targetFrame, new Quaternion())
+    const orientationSmoothing = 1 - Math.exp(-this.orientationFollowStrength * Math.max(dt, 0.016))
+    if (!this.actualPosition) this.followOrientation = targetFollowOrientation
+    else Quaternion.slerp(this.followOrientation, targetFollowOrientation, orientationSmoothing, this.followOrientation)
+    const followedBasis = getShipBasis(this.followOrientation)
+    this.latestForward = followedBasis.forward
+    this.latestRight = followedBasis.right
+    this.latestUp = followedBasis.up
+    const forward = this.cameraDetached ? this.referenceForward : followedBasis.forward
+    const right = this.cameraDetached ? this.referenceRight : followedBasis.right
+    const shipUp = this.cameraDetached ? this.referenceUp : followedBasis.up
     const cosPitch = Math.cos(this.state.pitch)
-    const orbitOffset = new Cartesian3()
-    Cartesian3.add(orbitOffset, Cartesian3.multiplyByScalar(forward, -Math.cos(this.state.yaw) * cosPitch, new Cartesian3()), orbitOffset)
-    Cartesian3.add(orbitOffset, Cartesian3.multiplyByScalar(right, Math.sin(this.state.yaw) * cosPitch, new Cartesian3()), orbitOffset)
-    Cartesian3.add(orbitOffset, Cartesian3.multiplyByScalar(shipUp, Math.sin(this.state.pitch), new Cartesian3()), orbitOffset)
+    const orbitOffset = this.orbitOffset
+    Cartesian3.multiplyByScalar(forward, -Math.cos(this.state.yaw) * cosPitch, this.orbitForward)
+    Cartesian3.multiplyByScalar(right, Math.sin(this.state.yaw) * cosPitch, this.orbitRight)
+    Cartesian3.multiplyByScalar(shipUp, Math.sin(this.state.pitch), this.orbitUp)
+    Cartesian3.add(this.orbitForward, this.orbitRight, orbitOffset)
+    Cartesian3.add(orbitOffset, this.orbitUp, orbitOffset)
     Cartesian3.normalize(orbitOffset, orbitOffset)
 
-    const desiredPosition = Cartesian3.add(position, Cartesian3.multiplyByScalar(orbitOffset, this.state.distance, new Cartesian3()), new Cartesian3())
+    const desiredPosition = Cartesian3.add(position, Cartesian3.multiplyByScalar(orbitOffset, this.state.distance, this.lookAheadOffset), this.desiredPosition)
     const speed = Cartesian3.magnitude(velocity)
-    const desiredLookAhead = this.lookAhead + Math.min(speed * 0.35, 18_000)
-    const lookTarget = Cartesian3.add(position, Cartesian3.multiplyByScalar(forward, desiredLookAhead, new Cartesian3()), new Cartesian3())
-    const desiredDirection = Cartesian3.normalize(Cartesian3.subtract(lookTarget, desiredPosition, new Cartesian3()), new Cartesian3())
-    const rollUp = Cartesian3.normalize(Cartesian3.lerp(earthUp, shipUp, this.rollInfluence, new Cartesian3()), new Cartesian3())
-    const desiredRight = Cartesian3.normalize(Cartesian3.cross(desiredDirection, rollUp, new Cartesian3()), new Cartesian3())
-    const desiredUp = Cartesian3.normalize(Cartesian3.cross(desiredRight, desiredDirection, new Cartesian3()), new Cartesian3())
+    const desiredLookAhead = this.lookAhead + Math.min(speed * 0.01, 500)
+    const lookAheadSmoothing = 1 - Math.exp(-3.5 * Math.max(dt, 0.016))
+    this.actualLookAhead = this.actualLookAhead === null
+      ? desiredLookAhead
+      : this.actualLookAhead + (desiredLookAhead - this.actualLookAhead) * lookAheadSmoothing
+    const desiredLookTarget = this.desiredLookTarget
+    if (this.cameraDetached) Cartesian3.clone(position, desiredLookTarget)
+    else {
+      Cartesian3.multiplyByScalar(forward, this.actualLookAhead, this.lookAheadOffset)
+      Cartesian3.add(position, this.lookAheadOffset, desiredLookTarget)
+    }
+    const earthUp = Ellipsoid.WGS84.geodeticSurfaceNormal(position, this.earthUp)
+    const rollUp = this.rollUp
+    if (this.cameraDetached) Cartesian3.clone(earthUp, rollUp)
+    else {
+      Cartesian3.lerp(earthUp, shipUp, this.rollInfluence, this.rollBlend)
+      normalizeOrFallback(this.rollBlend, earthUp, rollUp)
+    }
 
     if (!this.actualPosition || !this.actualUp) {
-      this.actualPosition = desiredPosition
-      this.actualUp = desiredUp
+      this.actualPosition = desiredPosition.clone()
+      this.actualLookTarget = desiredLookTarget.clone()
+      Cartesian3.subtract(this.actualLookTarget, desiredPosition, this.currentDirection)
+      const initialDirection = normalizeOrFallback(this.currentDirection, forward, this.finalDirection)
+      this.actualUp = stableCameraUp(initialDirection, rollUp, earthUp, new Cartesian3(), this.projectedUp)
     } else {
       const smoothing = 1 - Math.exp(-this.followStrength * Math.max(dt, 0.016))
       this.actualPosition = Cartesian3.lerp(this.actualPosition, desiredPosition, smoothing, this.actualPosition)
-      this.actualUp = Cartesian3.normalize(Cartesian3.lerp(this.actualUp, desiredUp, smoothing, this.actualUp), this.actualUp)
+      this.actualLookTarget = Cartesian3.lerp(this.actualLookTarget ?? desiredLookTarget, desiredLookTarget, smoothing, this.actualLookTarget ?? new Cartesian3())
+      Cartesian3.subtract(this.actualLookTarget, this.actualPosition, this.currentDirection)
+      const currentDirection = normalizeOrFallback(this.currentDirection, forward, this.finalDirection)
+      const desiredUp = stableCameraUp(currentDirection, rollUp, this.actualUp, this.desiredUp, this.projectedUp)
+      const blendedUp = Cartesian3.lerp(this.actualUp, desiredUp, smoothing, this.blendedUp)
+      this.actualUp = normalizeOrFallback(blendedUp, desiredUp, this.actualUp)
     }
-    const direction = Cartesian3.normalize(Cartesian3.subtract(lookTarget, this.actualPosition, new Cartesian3()), new Cartesian3())
+    Cartesian3.subtract(this.actualLookTarget ?? desiredLookTarget, this.actualPosition, this.currentDirection)
+    const direction = normalizeOrFallback(this.currentDirection, forward, this.finalDirection)
     this.viewer.camera.setView({ destination: this.actualPosition, orientation: { direction, up: this.actualUp } })
   }
 }

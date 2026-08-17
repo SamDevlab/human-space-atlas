@@ -71,4 +71,16 @@ describe('local API proxy', () => {
     expect((await request('/api/catalog?group=unknown')).status).toBe(400)
     expect((await request('/api/horizons')).status).toBe(400)
   })
+
+  it('normalizes live OpenSky aircraft states and applies the requested limit', async () => {
+    const states = Array.from({ length: 3 }, (_, index) => [
+      `abc${index}`, `TEST${index} `, 'Testland', 0, 1_700_000_000 + index,
+      index, index, 9_000 + index * 100, false, 240, 90, 0, null, 9_100 + index * 100,
+      null, false, 0, 3,
+    ])
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ time: 1_700_000_000, states }), { status: 200 }))
+    const response = await request('/api/aircraft/states?limit=2')
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({ source: 'opensky', states: [{ icao24: 'abc2' }, { icao24: 'abc1' }] })
+  })
 })

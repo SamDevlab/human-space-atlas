@@ -1,6 +1,7 @@
 import type { Cartesian3, Quaternion } from 'cesium'
 
 export type ExplorationCameraMode = 'THIRD_PERSON'
+export type ExplorationCameraPreset = 'ASTRONAUT' | 'ORBIT' | 'FOLLOW'
 export type AutopilotMode = 'OFF' | 'INTERCEPT' | 'APPROACH' | 'HOLD'
 
 export interface FlightInput {
@@ -44,14 +45,6 @@ export interface FlightDebugSnapshot {
   pointerLock: boolean
 }
 
-export interface AutopilotSnapshot {
-  mode: AutopilotMode
-  targetName: string | null
-  distanceKm: number | null
-  relativeSpeedKmS: number | null
-  etaSeconds: number | null
-}
-
 export interface ExplorationHudSnapshot {
   altitudeKm: number
   speedKmS: number
@@ -65,6 +58,5 @@ export interface ExplorationHudSnapshot {
   targetName: string | null
   targetDistanceKm: number | null
   targetIndicator: TargetIndicatorSnapshot | null
-  autopilot: AutopilotSnapshot
   debugFlight: FlightDebugSnapshot
 }

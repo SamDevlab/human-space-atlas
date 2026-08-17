@@ -2,31 +2,49 @@ import { useEffect, useMemo, useRef } from 'react'
 import {
   Cartesian3,
   Cartesian2,
+  ArcGISTiledElevationTerrainProvider,
   Color,
+  ColorMaterialProperty,
+  ConstantProperty,
+  ClassificationType,
+  createWorldTerrainAsync,
   Ellipsoid,
   EllipsoidGeometry,
+  EllipsoidTerrainProvider,
+  Entity,
   GeometryInstance,
+  HeightReference,
   ImageryLayer,
   Ion,
+  JulianDate,
+  LabelCollection,
+  LabelStyle,
   Material,
   MaterialAppearance,
+  Matrix3,
+  Matrix4,
+  NearFarScalar,
   PointPrimitiveCollection,
   Primitive,
+  SampledPositionProperty,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
-  VertexFormat,
+  ShadowMode,
+  TerrainProvider,
   Viewer,
+  VelocityOrientationProperty,
 } from 'cesium'
 import { discoverMapStyles } from '../lib/mapStyles'
-import { createNasaCloudProvider } from '../lib/earthLayers'
+import { createNasaCloudProvider, createNasaCloudTexture, createNasaCloudTextureFromApi, createNasaNightLightsProvider, NASA_GIBS_CLOUD_OBSERVATION_DATE } from '../lib/earthLayers'
 import { eventColor } from '../lib/earthEvents'
 import type { EarthEvent } from '../lib/earthEvents'
 import type { OmmRecord } from '../lib/types'
+import type { AircraftState } from '../lib/airTraffic'
 import { createSatrec, sampleOrbit, toCesiumHeightMeters } from '../lib/orbit'
 import type { WorkerCommand, WorkerResult } from '../workers/orbitProtocol'
 import { shouldApplyPositionResult } from '../workers/workerState'
 import { ExplorationController } from '../exploration/ExplorationController'
-import type { ExplorationHudSnapshot } from '../exploration/types'
+import type { ExplorationCameraPreset, ExplorationHudSnapshot } from '../exploration/types'
 
 interface GlobeProps {
   objects: OmmRecord[]
@@ -38,7 +56,18 @@ interface GlobeProps {
   mapStyle?: string
   cloudsEnabled?: boolean
   cloudOpacity?: number
+  cloudShadowsEnabled?: boolean
+  atmosphereEnabled?: boolean
+  terrainEnabled?: boolean
+  orbitsEnabled?: boolean
+  satelliteTrailsEnabled?: boolean
   onCloudError?: () => void
+  onTerrainLoading?: (loading: boolean) => void
+  aircraftEnabled?: boolean
+  aircraftRoutesEnabled?: boolean
+  aircraftStates?: AircraftState[]
+  selectedAircraftId?: string | null
+  onAircraftSelect?: (aircraftId: string | null) => void
   earthEvents?: EarthEvent[]
   earthEventsEnabled?: boolean
   eventCategories?: string[]
@@ -51,29 +80,68 @@ interface GlobeProps {
   targetPosition?: Cartesian3 | null
   targetVelocity?: Cartesian3 | null
   targetName?: string | null
-  autopilotAction?: 'ENGAGE' | 'CANCEL' | null
-  autopilotRequest?: number
   onExplorationHud?: (snapshot: ExplorationHudSnapshot) => void
   onExitExplore?: () => void
   onOpenExploreNav?: () => void
   onExploreActivity?: () => void
-  explorationSteeringSensitivity?: number
   explorationCameraSensitivity?: number
+  explorationCameraPreset?: ExplorationCameraPreset
 }
 
 const POINT_SIZE = 5
+// The orbit worker receives a new simulated sample every 500 ms. Keeping the
+// render interpolation slightly longer than that interval prevents a visible
+// stop/start seam when the next sample arrives.
+const SATELLITE_INTERPOLATION_MS = 720
+const CLOUD_DRIFT_RADIANS_PER_SECOND = 0.0009
+const CLOUD_SHADOW_DRIFT_RADIANS_PER_SECOND = 0.00082
+const ARC_GIS_TERRAIN_URL = 'https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer'
+const AIRCRAFT_PREDICTION_SECONDS = 15
+const AIRCRAFT_ROUTE_RETENTION_MS = 5 * 60 * 1000
+const AIRCRAFT_ICON = `data:image/svg+xml;charset=utf-8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#ffd39a" d="M31 2h2l4 25 20 12v4L37 39l-2 21h-6l-2-21L7 43v-4l20-12z"/><path fill="#fff2d8" d="M31 8h2v45h-2z"/></svg>')}`
 
-export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', cloudsEnabled = true, cloudOpacity = 0.55, onCloudError, earthEvents = [], earthEventsEnabled = true, eventCategories = [], onEarthEventSelect, eventViewRequest = 0, eventViewPosition = null, onMapStyleError, onMapStyleLoading, explorationActive = false, targetPosition = null, targetVelocity = null, targetName = null, autopilotAction = null, autopilotRequest = 0, onExplorationHud, onExitExplore, onOpenExploreNav, onExploreActivity, explorationSteeringSensitivity = 1, explorationCameraSensitivity = 1 }: GlobeProps) {
+type AircraftVisual = {
+  entity: Entity
+  route: Entity
+  position: SampledPositionProperty
+}
+
+type AircraftTrackPoint = {
+  timestamp: number
+  position: Cartesian3
+}
+
+function predictAircraftPosition(state: AircraftState, seconds: number) {
+  const latitudeRadians = state.latitudeDeg * Math.PI / 180
+  const trackRadians = (state.trueTrackDeg ?? 0) * Math.PI / 180
+  const distanceMeters = state.velocityMetersPerSecond * seconds
+  const earthRadiusMeters = 6_371_000
+  const nextLatitude = state.latitudeDeg + (distanceMeters * Math.cos(trackRadians) / earthRadiusMeters) * 180 / Math.PI
+  const nextLongitude = state.longitudeDeg + (distanceMeters * Math.sin(trackRadians) / Math.max(earthRadiusMeters * Math.cos(latitudeRadians), 1)) * 180 / Math.PI
+  const nextAltitude = Math.max(500, state.altitudeMeters + state.verticalRateMetersPerSecond * seconds)
+  return Cartesian3.fromDegrees(nextLongitude, nextLatitude, nextAltitude)
+}
+
+export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformance, homeRequest = 0, mapStyle = 'satellite', cloudsEnabled = true, cloudOpacity = 0.55, cloudShadowsEnabled = true, atmosphereEnabled = true, terrainEnabled = true, orbitsEnabled = true, satelliteTrailsEnabled = false, onCloudError, onTerrainLoading, aircraftEnabled = false, aircraftRoutesEnabled = true, aircraftStates = [], selectedAircraftId = null, onAircraftSelect, earthEvents = [], earthEventsEnabled = true, eventCategories = [], onEarthEventSelect, eventViewRequest = 0, eventViewPosition = null, onMapStyleError, onMapStyleLoading, explorationActive = false, targetPosition = null, targetVelocity = null, targetName = null, onExplorationHud, onExitExplore, onOpenExploreNav, onExploreActivity, explorationCameraSensitivity = 1, explorationCameraPreset = 'FOLLOW' }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const pointsRef = useRef<PointPrimitiveCollection | null>(null)
-  const atmospherePrimitiveRef = useRef<Primitive | null>(null)
+  const labelsRef = useRef<LabelCollection | null>(null)
   const workerRef = useRef<Worker | null>(null)
   const generationRef = useRef(0)
   const requestRef = useRef(0)
   const latestAppliedRequestRef = useRef(0)
   const defaultImageryRef = useRef<unknown>(null)
   const cloudLayerRef = useRef<ImageryLayer | null>(null)
+  const nightLightsLayerRef = useRef<ImageryLayer | null>(null)
+  const cloudShellRef = useRef<Primitive[]>([])
+  const orbitEntityRef = useRef<Entity | null>(null)
+  const satelliteTrailEntityRef = useRef<Entity | null>(null)
+  const orbitPositionsRef = useRef<ConstantProperty | null>(null)
+  const satelliteTrailPositionsRef = useRef<ConstantProperty | null>(null)
+  const terrainProviderRef = useRef<TerrainProvider | null>(null)
+  const aircraftVisualsRef = useRef(new Map<string, AircraftVisual>())
+  const aircraftTracksRef = useRef(new Map<string, AircraftTrackPoint[]>())
   const imageryRequestRef = useRef(0)
   const explorationRef = useRef<ExplorationController | null>(null)
 
@@ -91,6 +159,7 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
 
     const token = import.meta.env.VITE_CESIUM_ION_TOKEN
     if (token) Ion.defaultAccessToken = token
+    let terrainCancelled = false
 
     const viewer = new Viewer(containerRef.current, {
       animation: false,
@@ -106,55 +175,96 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       shouldAnimate: true,
     })
 
+    const cameraController = viewer.scene.screenSpaceCameraController
+    cameraController.enableCollisionDetection = true
+    cameraController.minimumZoomDistance = 250
+    // Keep drag, spin and zoom continuous while imagery/terrain refine in the
+    // background instead of making the camera feel like it is stepping tiles.
+    cameraController.inertiaSpin = 0.88
+    cameraController.inertiaTranslate = 0.9
+    cameraController.inertiaZoom = 0.82
+    cameraController.maximumMovementRatio = 0.08
     viewer.camera.setView({ destination: Cartesian3.fromDegrees(-18, 18, 18_000_000) })
     defaultImageryRef.current = viewer.imageryLayers.get(0)?.imageryProvider ?? null
 
     viewer.scene.globe.enableLighting = true
-    viewer.scene.globe.showGroundAtmosphere = true
+    // Keep terrain and imagery tiles refining while the camera approaches the
+    // surface. The cloud field is intentionally handled separately below.
+    viewer.scene.globe.maximumScreenSpaceError = 2.15
+    viewer.scene.globe.tileCacheSize = 384
+    viewer.scene.globe.preloadAncestors = true
+    viewer.scene.globe.preloadSiblings = true
+    viewer.scene.globe.depthTestAgainstTerrain = true
+    viewer.scene.globe.showGroundAtmosphere = atmosphereEnabled
     viewer.scene.globe.dynamicAtmosphereLighting = true
     viewer.scene.globe.dynamicAtmosphereLightingFromSun = true
-    viewer.scene.globe.atmosphereLightIntensity = 18
-    viewer.scene.globe.atmosphereBrightnessShift = 0.02
-    viewer.scene.globe.atmosphereSaturationShift = 0.18
+    viewer.scene.globe.atmosphereLightIntensity = 20
+    viewer.scene.globe.atmosphereBrightnessShift = 0.035
+    viewer.scene.globe.atmosphereSaturationShift = 0.12
     const skyAtmosphere = viewer.scene.skyAtmosphere
     if (skyAtmosphere) {
-      skyAtmosphere.show = true
+      skyAtmosphere.show = atmosphereEnabled
       skyAtmosphere.perFragmentAtmosphere = true
       skyAtmosphere.atmosphereLightIntensity = 72
-      skyAtmosphere.brightnessShift = 0.02
-      skyAtmosphere.saturationShift = 0.16
+      skyAtmosphere.brightnessShift = 0.035
+      skyAtmosphere.saturationShift = 0.12
     }
+    // Cesium computes both bodies from the scene clock. Keep them visible and
+    // slightly more legible against the deep-space background.
+    const sun = viewer.scene.sun
+    if (sun) {
+      sun.show = true
+      sun.glowFactor = 1.35
+    }
+    const moon = viewer.scene.moon
+    if (moon) moon.show = true
+    const shadowMap = viewer.shadowMap
+    shadowMap.enabled = true
+    shadowMap.softShadows = true
+    shadowMap.normalOffset = true
+    shadowMap.fadingEnabled = true
+    shadowMap.darkness = 0.3
+    shadowMap.size = 2048
+    shadowMap.maximumDistance = 6_000_000
+    viewer.scene.globe.shadows = ShadowMode.ENABLED
+    viewer.scene.globe.vertexShadowDarkness = 0.42
+    viewer.scene.globe.lambertDiffuseMultiplier = 1.12
     viewer.scene.backgroundColor = Color.fromCssColorString('#02040b')
+    // A modest exaggeration makes mountain ranges readable from low orbit
+    // while keeping the global silhouette believable.
+    viewer.scene.verticalExaggeration = 1.16
+    viewer.scene.verticalExaggerationRelativeHeight = 0
 
-    const atmosphereRadii = Cartesian3.multiplyByScalar(Ellipsoid.WGS84.radii, 1.014, new Cartesian3())
-    const atmospherePrimitive = viewer.scene.primitives.add(new Primitive({
-      geometryInstances: new GeometryInstance({
-        geometry: new EllipsoidGeometry({
-          radii: atmosphereRadii,
-          stackPartitions: 48,
-          slicePartitions: 64,
-          vertexFormat: VertexFormat.POSITION_AND_NORMAL,
-        }),
-      }),
-      appearance: new MaterialAppearance({
-        material: Material.fromType('RimLighting', {
-          color: Color.WHITE.withAlpha(0),
-          rimColor: Color.fromCssColorString('#56bfff').withAlpha(0.26),
-          width: 0.42,
-        }),
-        faceForward: true,
-        translucent: true,
-        closed: false,
-        materialSupport: MaterialAppearance.MaterialSupport.BASIC,
-      }),
-      allowPicking: false,
-      asynchronous: false,
-      cull: false,
-    }))
-    atmospherePrimitiveRef.current = atmospherePrimitive
+    const loadTerrain = async () => {
+      if (token) {
+        try {
+      return await createWorldTerrainAsync({ requestVertexNormals: true, requestWaterMask: true })
+        } catch {
+          // Fall through to the public ArcGIS elevation service.
+        }
+      }
+      return ArcGISTiledElevationTerrainProvider.fromUrl(ARC_GIS_TERRAIN_URL)
+    }
+    onTerrainLoading?.(true)
+    loadTerrain().then((terrainProvider) => {
+      if (terrainCancelled || viewer.isDestroyed()) return
+      terrainProviderRef.current = terrainProvider
+      if (!terrainEnabled) {
+        onTerrainLoading?.(false)
+        return
+      }
+      viewer.terrainProvider = terrainProvider
+      viewer.scene.globe.enableLighting = true
+      viewer.scene.requestRender()
+      onTerrainLoading?.(false)
+    }).catch(() => {
+      // Keep the ellipsoid fallback if remote elevation is unavailable.
+      onTerrainLoading?.(false)
+    })
 
     const points = viewer.scene.primitives.add(new PointPrimitiveCollection())
     pointsRef.current = points
+    labelsRef.current = viewer.scene.primitives.add(new LabelCollection())
     viewerRef.current = viewer
     explorationRef.current = new ExplorationController(viewer, {
       onHudUpdate: (snapshot) => onExplorationHud?.(snapshot),
@@ -175,6 +285,13 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
         onEarthEventSelect?.(earthEventId)
         return
       }
+      const aircraftId = picked?.id?.properties?.aircraftId?.getValue?.(viewer.clock.currentTime) ?? picked?.id?.aircraftId
+      if (typeof aircraftId === 'string') {
+        onAircraftSelect?.(aircraftId)
+        onSelect(null)
+        onEarthEventSelect?.(null)
+        return
+      }
       const id = picked?.id?.catalogId
       onSelect(typeof id === 'number' ? id : null)
     }, ScreenSpaceEventType.LEFT_CLICK)
@@ -182,15 +299,54 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     return () => {
       handler.destroy()
       pointsRef.current = null
-      atmospherePrimitiveRef.current = null
+      labelsRef.current = null
       worker.postMessage({ type: 'DISPOSE' } satisfies WorkerCommand)
       workerRef.current = null
       explorationRef.current?.destroy()
       explorationRef.current = null
+      terrainCancelled = true
+      terrainProviderRef.current = null
+      cloudShellRef.current.forEach((shell) => viewer.scene.primitives.remove(shell))
+      cloudShellRef.current = []
+      if (nightLightsLayerRef.current && !viewer.isDestroyed()) viewer.imageryLayers.remove(nightLightsLayerRef.current, false)
+      nightLightsLayerRef.current = null
+      orbitEntityRef.current = null
+      satelliteTrailEntityRef.current = null
+      orbitPositionsRef.current = null
+      satelliteTrailPositionsRef.current = null
+      aircraftVisualsRef.current.forEach(({ entity, route }) => { viewer.entities.remove(entity); viewer.entities.remove(route) })
+      aircraftVisualsRef.current.clear()
+      aircraftTracksRef.current.clear()
       viewerRef.current = null
       viewer.destroy()
     }
-  }, [onSelect, onExplorationHud, onExitExplore, onOpenExploreNav, onExploreActivity])
+  }, [onSelect, onExplorationHud, onExitExplore, onOpenExploreNav, onExploreActivity, onEarthEventSelect, onAircraftSelect])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer || viewer.isDestroyed()) return
+    viewer.scene.globe.showGroundAtmosphere = atmosphereEnabled
+    if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = atmosphereEnabled
+    if (viewer.scene.sun) viewer.scene.sun.show = atmosphereEnabled
+    if (viewer.scene.moon) viewer.scene.moon.show = atmosphereEnabled
+    viewer.scene.requestRender()
+  }, [atmosphereEnabled])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer || viewer.isDestroyed()) return
+    viewer.terrainProvider = terrainEnabled && terrainProviderRef.current
+      ? terrainProviderRef.current
+      : new EllipsoidTerrainProvider()
+    viewer.scene.globe.enableLighting = terrainEnabled
+    viewer.scene.requestRender()
+  }, [terrainEnabled])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer || viewer.isDestroyed()) return
+    viewer.clock.currentTime = JulianDate.fromDate(simulatedAt)
+  }, [simulatedAt])
 
   useEffect(() => {
     const controller = explorationRef.current
@@ -201,15 +357,11 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
 
   useEffect(() => { explorationRef.current?.setTarget(targetPosition, targetName, targetVelocity) }, [targetPosition, targetName, targetVelocity])
   useEffect(() => {
-    const controller = explorationRef.current
-    if (!controller || !autopilotAction || autopilotRequest === 0) return
-    if (autopilotAction === 'ENGAGE') controller.engageAutopilot()
-    else controller.cancelAutopilot()
-  }, [autopilotAction, autopilotRequest])
-  useEffect(() => {
-    explorationRef.current?.setSteeringSensitivity(explorationSteeringSensitivity)
     explorationRef.current?.setCameraSensitivity(explorationCameraSensitivity)
-  }, [explorationSteeringSensitivity, explorationCameraSensitivity])
+  }, [explorationCameraSensitivity])
+  useEffect(() => {
+    explorationRef.current?.setCameraPreset(explorationCameraPreset)
+  }, [explorationCameraPreset])
 
   useEffect(() => {
     const viewer = viewerRef.current
@@ -219,19 +371,19 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
 
   useEffect(() => {
     const viewer = viewerRef.current
-    if (!viewer) return
+    if (!viewer || viewer.isDestroyed()) return
     const requestId = imageryRequestRef.current + 1
     imageryRequestRef.current = requestId
     const definition = discoverMapStyles().find((style) => style.id === mapStyle) ?? discoverMapStyles()[0]
     const current = viewer.imageryLayers.get(0)
     if (!current) { onMapStyleLoading?.(false); return }
     let cancelled = false
-    if (definition.isDefault) {
+    if (!definition.create) {
       if (defaultImageryRef.current && current.imageryProvider !== defaultImageryRef.current) {
         viewer.imageryLayers.remove(current, false)
         viewer.imageryLayers.addImageryProvider(defaultImageryRef.current as Parameters<typeof viewer.imageryLayers.addImageryProvider>[0])
-        if (cloudLayerRef.current) viewer.imageryLayers.raiseToTop(cloudLayerRef.current)
       }
+      if (cloudLayerRef.current) viewer.imageryLayers.raiseToTop(cloudLayerRef.current)
       onMapStyleLoading?.(false)
       return () => { cancelled = true }
     }
@@ -255,32 +407,204 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
 
   useEffect(() => {
     const viewer = viewerRef.current
-    if (!viewer) return
+    if (!viewer || viewer.isDestroyed() || nightLightsLayerRef.current) return
+    const provider = createNasaNightLightsProvider()
+    const layer = viewer.imageryLayers.addImageryProvider(provider, 1)
+    // VIIRS encodes the fill as black. Convert only that fill to transparency,
+    // preserving the warm radiance of the city pixels over the day texture.
+    layer.colorToAlpha = Color.BLACK
+    layer.colorToAlphaThreshold = 0.018
+    layer.alpha = 0.78
+    layer.brightness = 1.8
+    layer.contrast = 1.25
+    nightLightsLayerRef.current = layer
+    return () => {
+      if (!viewer.isDestroyed() && nightLightsLayerRef.current === layer) viewer.imageryLayers.remove(layer, false)
+      if (nightLightsLayerRef.current === layer) nightLightsLayerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer || viewer.isDestroyed()) return
     let cancelled = false
-    if (!viewer.isDestroyed() && cloudLayerRef.current) {
-      viewer.imageryLayers.remove(cloudLayerRef.current, false)
+    const removeCloudLayer = () => {
+      if (!viewer.isDestroyed() && cloudLayerRef.current) viewer.imageryLayers.remove(cloudLayerRef.current, false)
       cloudLayerRef.current = null
     }
+    removeCloudLayer()
     if (!cloudsEnabled) return
-    createNasaCloudProvider().then((provider) => {
+    const opacity = Math.max(0, Math.min(1, cloudOpacity))
+    const fallbackCloudTexture = createNasaCloudTexture()
+    const cloudTextureUrl = fallbackCloudTexture.toDataURL('image/png')
+    // The procedural shell is the readable low-orbit volume. Keep it strong
+    // enough to show individual cloud systems, but let the texture's alpha
+    // define the shape so it never becomes a uniform white veil.
+    const cloudShellAlpha = opacity * (explorationActive ? 0.78 : 0.52)
+    const cloudMaterial = Material.fromType('Image', {
+      image: cloudTextureUrl,
+      color: Color.WHITE.withAlpha(cloudShellAlpha),
+    })
+    const wispyMaterial = Material.fromType('Image', {
+      image: cloudTextureUrl,
+      color: Color.fromCssColorString('#d8efff').withAlpha(cloudShellAlpha * 0.2),
+    })
+    const shadowMaterial = Material.fromType('Image', {
+      image: cloudTextureUrl,
+      color: Color.fromCssColorString('#0a1825').withAlpha(opacity * (explorationActive ? 0.12 : 0.07)),
+    })
+    const createCloudShell = (height: number, material: Material) => viewer.scene.primitives.add(new Primitive({
+      geometryInstances: new GeometryInstance({
+        geometry: new EllipsoidGeometry({
+          radii: Cartesian3.add(Ellipsoid.WGS84.radii, new Cartesian3(height, height, height), new Cartesian3()),
+          stackPartitions: 96,
+          slicePartitions: 192,
+          vertexFormat: MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat,
+        }),
+      }),
+      appearance: new MaterialAppearance({ material, faceForward: true, translucent: true, flat: true }),
+      asynchronous: false,
+      allowPicking: false,
+      cull: false,
+      show: true,
+    }))
+    // Keep one elevated shell in both modes. It is anchored to the globe and
+    // uses the observed NASA mask, so Explore never falls back to camera-
+    // relative cloud sprites or floating blobs.
+    const cloudShell = createCloudShell(11_500, cloudMaterial)
+    // The low shadow shell is useful in the map view, but from the spacecraft
+    // it sits directly in front of the terrain and exaggerates any source
+    // pixel into square plates. Explore keeps the soft high cloud volume and
+    // leaves the terrain readable; the shadow option still applies to the map.
+    const shadowShell = cloudShadowsEnabled && !explorationActive ? createCloudShell(1_800, shadowMaterial) : null
+    cloudShellRef.current = [cloudShell, shadowShell].filter((shell): shell is Primitive => Boolean(shell))
+    const cloudMotionStartedAt = performance.now()
+    createNasaCloudTextureFromApi().catch(() => fallbackCloudTexture).then((cloudTexture) => {
       if (cancelled || viewer.isDestroyed()) return
-      const layer = viewer.imageryLayers.addImageryProvider(provider)
-      layer.alpha = cloudOpacity
-      cloudLayerRef.current = layer
-      viewer.imageryLayers.raiseToTop(layer)
+      const cloudTextureUrl = cloudTexture.toDataURL('image/png')
+      cloudMaterial.uniforms.image = cloudTextureUrl
+      wispyMaterial.uniforms.image = cloudTextureUrl
+      shadowMaterial.uniforms.image = cloudTextureUrl
+      return createNasaCloudProvider(NASA_GIBS_CLOUD_OBSERVATION_DATE, cloudTexture)
+    }).then((provider) => {
+      if (cancelled || viewer.isDestroyed() || !provider) return
+      const cloudLayer = viewer.imageryLayers.addImageryProvider(provider)
+      const updateCloudDetail = () => {
+        if (viewer.isDestroyed()) return
+        const height = viewer.camera.positionCartographic.height
+        // Use the observed NASA mask directly in Explore so clouds stay
+        // attached to the Earth instead of floating in front of the camera.
+        const detailFade = Math.max(0, Math.min(1, (height - 900_000) / 1_900_000))
+        cloudLayer.alpha = explorationActive
+          ? opacity * 0.9
+          : opacity * detailFade * 0.95
+        cloudLayer.show = explorationActive || detailFade > 0.01
+        // Fade the optional elevated map shells when the camera gets close
+        // to the surface; Explore has no separate floating cloud geometry.
+        const shellFade = Math.max(0.3, Math.min(1, 0.3 + (height - 70_000) / 250_000))
+        cloudMaterial.uniforms.color = Color.WHITE.withAlpha(cloudShellAlpha * shellFade)
+        wispyMaterial.uniforms.color = Color.fromCssColorString('#d8efff').withAlpha(cloudShellAlpha * 0.2 * shellFade)
+        shadowMaterial.uniforms.color = Color.fromCssColorString('#0a1825').withAlpha(opacity * (explorationActive ? 0.12 : 0.07) * shellFade)
+        if (cloudShell) cloudShell.show = shellFade > 0.02
+        if (shadowShell) shadowShell.show = cloudShadowsEnabled && shellFade > 0.15
+        const cloudRotation = Matrix3.fromRotationZ((performance.now() - cloudMotionStartedAt) / 1000 * CLOUD_DRIFT_RADIANS_PER_SECOND, new Matrix3())
+        if (cloudShell) cloudShell.modelMatrix = Matrix4.fromRotationTranslation(cloudRotation, Cartesian3.ZERO, new Matrix4())
+        if (shadowShell) {
+          const shadowRotation = Matrix3.fromRotationZ((performance.now() - cloudMotionStartedAt) / 1000 * CLOUD_SHADOW_DRIFT_RADIANS_PER_SECOND, new Matrix3())
+          shadowShell.modelMatrix = Matrix4.fromRotationTranslation(shadowRotation, Cartesian3.ZERO, new Matrix4())
+        }
+      }
+      updateCloudDetail()
+      viewer.scene.preRender.addEventListener(updateCloudDetail)
+      cloudLayerRef.current = cloudLayer
+      viewer.imageryLayers.raiseToTop(cloudLayer)
+      ;(cloudLayer as ImageryLayer & { __hsaDetailListener?: () => void }).__hsaDetailListener = updateCloudDetail
     }).catch(() => { if (!cancelled) onCloudError?.() })
     return () => {
       cancelled = true
-      if (!viewer.isDestroyed() && cloudLayerRef.current) {
-        viewer.imageryLayers.remove(cloudLayerRef.current, false)
-        cloudLayerRef.current = null
-      }
+      const cloudLayer = cloudLayerRef.current as (ImageryLayer & { __hsaDetailListener?: () => void }) | null
+      if (cloudLayer?.__hsaDetailListener && !viewer.isDestroyed()) viewer.scene.preRender.removeEventListener(cloudLayer.__hsaDetailListener)
+      removeCloudLayer()
+      cloudShellRef.current.forEach((shell) => { if (!viewer.isDestroyed()) viewer.scene.primitives.remove(shell) })
+      cloudShellRef.current = []
     }
-  }, [cloudsEnabled, onCloudError])
+  }, [cloudsEnabled, explorationActive, cloudOpacity, cloudShadowsEnabled, onCloudError])
 
   useEffect(() => {
-    if (cloudLayerRef.current) cloudLayerRef.current.alpha = Math.max(0, Math.min(1, cloudOpacity))
-  }, [cloudOpacity])
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const visuals = aircraftVisualsRef.current
+    const tracks = aircraftTracksRef.current
+    const activeIds = new Set<string>()
+    const now = JulianDate.now()
+    const nextTime = JulianDate.addSeconds(now, AIRCRAFT_PREDICTION_SECONDS, new JulianDate())
+    const currentTimestamp = Date.now()
+
+    if (aircraftEnabled) {
+      for (const aircraft of aircraftStates) {
+        const id = aircraft.icao24
+        activeIds.add(id)
+        const currentPosition = Cartesian3.fromDegrees(aircraft.longitudeDeg, aircraft.latitudeDeg, aircraft.altitudeMeters)
+        const track = tracks.get(id) ?? []
+        const lastTrackPoint = track[track.length - 1]
+        if (!lastTrackPoint) track.push({ timestamp: aircraft.lastContact * 1000 - AIRCRAFT_PREDICTION_SECONDS * 1000, position: predictAircraftPosition(aircraft, -AIRCRAFT_PREDICTION_SECONDS) })
+        if (!lastTrackPoint || lastTrackPoint.timestamp < aircraft.lastContact * 1000) track.push({ timestamp: aircraft.lastContact * 1000, position: currentPosition })
+        const cutoff = currentTimestamp - AIRCRAFT_ROUTE_RETENTION_MS
+        while (track.length > 2 && track[0].timestamp < cutoff) track.shift()
+        tracks.set(id, track)
+
+        let visual = visuals.get(id)
+        if (!visual) {
+          const position = new SampledPositionProperty()
+          const entity = viewer.entities.add({
+            id: `aircraft-${id}`,
+            position,
+            orientation: new VelocityOrientationProperty(position),
+            properties: { aircraftId: id, callsign: aircraft.callsign ?? id },
+            billboard: {
+              image: AIRCRAFT_ICON,
+              width: 19,
+              height: 19,
+              scaleByDistance: new NearFarScalar(100_000, 1.35, 25_000_000, 0.65),
+              translucencyByDistance: new NearFarScalar(100_000, 1, 30_000_000, 0.35),
+            },
+          })
+          const route = viewer.entities.add({
+            id: `aircraft-route-${id}`,
+            polyline: {
+              positions: [],
+              width: 1.25,
+              material: Color.fromCssColorString('#ffcf9a').withAlpha(0.55),
+              depthFailMaterial: Color.fromCssColorString('#d89b67').withAlpha(0.22),
+              show: aircraftRoutesEnabled,
+            },
+          })
+          visual = { entity, route, position }
+          visuals.set(id, visual)
+        }
+
+        const position = new SampledPositionProperty()
+        position.addSample(now, currentPosition)
+        position.addSample(nextTime, predictAircraftPosition(aircraft, AIRCRAFT_PREDICTION_SECONDS))
+        visual.position = position
+        visual.entity.position = position
+        visual.entity.orientation = new VelocityOrientationProperty(position)
+        if (visual.route.polyline) {
+          visual.route.polyline.positions = new ConstantProperty(track.map((point) => point.position))
+          visual.route.polyline.show = new ConstantProperty(aircraftRoutesEnabled && selectedAircraftId === id && track.length > 1)
+        }
+        visual.entity.show = true
+      }
+    }
+
+    for (const [id, visual] of visuals) {
+      if (activeIds.has(id)) continue
+      viewer.entities.remove(visual.entity)
+      viewer.entities.remove(visual.route)
+      visuals.delete(id)
+      tracks.delete(id)
+    }
+  }, [aircraftEnabled, aircraftRoutesEnabled, aircraftStates, selectedAircraftId])
 
   useEffect(() => {
     const worker = workerRef.current
@@ -292,21 +616,59 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
 
   useEffect(() => {
     const points = pointsRef.current
+    const labels = labelsRef.current
     if (!points) return
 
     points.removeAll()
+    labels?.removeAll()
     for (const object of objects) {
       points.add({
         position: Cartesian3.ZERO,
         pixelSize: POINT_SIZE,
+        scaleByDistance: new NearFarScalar(1_000, 1.5, 20_000_000, 0.6),
         color: object.NORAD_CAT_ID === selectedId ? Color.CYAN : Color.WHITE,
         outlineColor: Color.fromCssColorString('#0b1023'),
         outlineWidth: 1,
         id: { catalogId: object.NORAD_CAT_ID },
         show: false,
       })
+      labels?.add({
+        position: Cartesian3.ZERO,
+        text: object.OBJECT_NAME,
+        font: '11px sans-serif',
+        fillColor: object.NORAD_CAT_ID === selectedId ? Color.CYAN : Color.WHITE,
+        outlineColor: Color.fromCssColorString('#02040b'),
+        outlineWidth: 3,
+        style: LabelStyle.FILL_AND_OUTLINE,
+        scaleByDistance: new NearFarScalar(1_000, 1, 4_000_000, 0.65),
+        show: false,
+      })
     }
   }, [objects, selectedId])
+
+  useEffect(() => {
+    const viewer = viewerRef.current
+    const labels = labelsRef.current
+    if (!viewer || !labels) return
+    const updateLabels = () => {
+      const cameraPosition = viewer.camera.positionWC
+      for (let index = 0; index < labels.length; index += 1) {
+        const label = labels.get(index)
+        const object = objects[index]
+        const point = pointsRef.current?.get(index)
+        if (!object || !point || !point.show || explorationActive) {
+          label.show = false
+          continue
+        }
+        const nearCamera = Cartesian3.distance(cameraPosition, point.position) < 1_600_000
+        label.position = point.position
+        label.show = object.NORAD_CAT_ID === selectedId || nearCamera
+      }
+    }
+    updateLabels()
+    viewer.scene.preRender.addEventListener(updateLabels)
+    return () => { if (!viewer.isDestroyed()) viewer.scene.preRender.removeEventListener(updateLabels) }
+  }, [objects, selectedId, explorationActive])
 
   useEffect(() => {
     const viewer = viewerRef.current
@@ -323,13 +685,19 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
           id,
           position: Cartesian3.fromDegrees(event.geometry.coordinates[0], event.geometry.coordinates[1]),
           properties: { earthEventId: event.id },
-          point: { pixelSize: 9, color, outlineColor: Color.WHITE, outlineWidth: 1, heightReference: 0 },
+          point: { pixelSize: 10, color, outlineColor: Color.WHITE, outlineWidth: 1, heightReference: HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY },
         })
       } else {
         viewer.entities.add({
           id,
           properties: { earthEventId: event.id },
-          polygon: { hierarchy: Cartesian3.fromDegreesArray(event.geometry.coordinates.flat()), material: color.withAlpha(0.25), outline: true, outlineColor: color, height: 2_000 },
+          polygon: {
+            hierarchy: new ConstantProperty(Cartesian3.fromDegreesArray(event.geometry.coordinates.flat())),
+            material: new ColorMaterialProperty(color.withAlpha(0.22)),
+            outline: new ConstantProperty(true),
+            outlineColor: new ConstantProperty(color),
+            classificationType: new ConstantProperty(ClassificationType.TERRAIN),
+          },
         })
       }
     }
@@ -342,59 +710,143 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   }, [eventViewRequest, eventViewPosition])
 
   useEffect(() => {
+    if (!explorationActive || !pointsRef.current) return
+    for (let index = 0; index < pointsRef.current.length; index += 1) pointsRef.current.get(index).show = false
+  }, [explorationActive])
+
+  useEffect(() => {
     const worker = workerRef.current
     const points = pointsRef.current
     if (!worker || !points || objects.length === 0) return
-    const requestId = requestRef.current + 1
-    requestRef.current = requestId
     const generation = generationRef.current
+    const pointById = new Map(objects.map((object, index) => [object.NORAD_CAT_ID, points.get(index)]))
+    const labelById = new Map(objects.map((object, index) => [object.NORAD_CAT_ID, labelsRef.current?.get(index)]))
+    const transitions = new Map<number, { point: ReturnType<PointPrimitiveCollection['get']>; from: Cartesian3; to: Cartesian3; startedAt: number }>()
+    const initialized = new Set<number>()
+    let animationFrame = 0
+    const animateTransitions = (now: number) => {
+      let active = false
+      for (const transition of transitions.values()) {
+        const progress = Math.min(1, (now - transition.startedAt) / SATELLITE_INTERPOLATION_MS)
+        Cartesian3.lerp(transition.from, transition.to, progress, transition.point.position)
+        if (progress < 1) active = true
+      }
+      if (active) animationFrame = requestAnimationFrame(animateTransitions)
+      else animationFrame = 0
+    }
     const onMessage = (event: MessageEvent<WorkerResult>) => {
       const result = event.data
       if (result.type !== 'POSITIONS' || result.generation !== generation || !shouldApplyPositionResult(result.requestId, latestAppliedRequestRef.current)) return
       latestAppliedRequestRef.current = result.requestId
       const applyStarted = performance.now()
-      const pointById = new Map(objects.map((object, index) => [object.NORAD_CAT_ID, points.get(index)]))
+      const receivedAt = performance.now()
       for (let i = 0; i < result.ids.length; i += 1) {
         const point = pointById.get(result.ids[i])
         if (!point) continue
-        point.position = Cartesian3.fromDegrees(result.values[i * 3], result.values[i * 3 + 1], result.values[i * 3 + 2])
+        const label = labelById.get(result.ids[i])
+        const nextPosition = Cartesian3.fromDegrees(result.values[i * 3], result.values[i * 3 + 1], result.values[i * 3 + 2])
+        if (!initialized.has(result.ids[i])) {
+          point.position = nextPosition
+          initialized.add(result.ids[i])
+        } else {
+          transitions.set(result.ids[i], { point, from: point.position.clone(), to: nextPosition, startedAt: receivedAt })
+        }
         point.color = result.ids[i] === selectedId ? Color.CYAN : Color.WHITE
         point.pixelSize = result.ids[i] === selectedId ? 10 : POINT_SIZE
-        point.show = true
+        if (label) {
+          label.position = point.position
+          label.fillColor = result.ids[i] === selectedId ? Color.CYAN : Color.WHITE
+        }
+        // Catalog markers stay out of Explore so they cannot be mistaken for
+        // cloud particles around the spacecraft.
+        point.show = !explorationActive
       }
+      if (!animationFrame && transitions.size > 0) animationFrame = requestAnimationFrame(animateTransitions)
       onPerformance?.({ workerMs: result.elapsedMs, applyMs: performance.now() - applyStarted, transferBytes: result.values.byteLength, pending: Math.max(0, requestRef.current - result.requestId) })
     }
     worker.addEventListener('message', onMessage)
-    worker.postMessage({ type: 'PROPAGATE', generation, requestId, timeMs: simulatedAt.getTime() } satisfies WorkerCommand)
-    return () => worker.removeEventListener('message', onMessage)
-  }, [objects, selectedId, simulatedAt, onPerformance])
+    return () => {
+      worker.removeEventListener('message', onMessage)
+      if (animationFrame) cancelAnimationFrame(animationFrame)
+      transitions.clear()
+    }
+  }, [objects, selectedId, explorationActive, onPerformance])
+
+  useEffect(() => {
+    const worker = workerRef.current
+    if (!worker || objects.length === 0) return
+    const requestId = requestRef.current + 1
+    requestRef.current = requestId
+    worker.postMessage({ type: 'PROPAGATE', generation: generationRef.current, requestId, timeMs: simulatedAt.getTime() } satisfies WorkerCommand)
+  }, [objects, simulatedAt])
 
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer) return
 
-    const entityId = 'selected-orbit'
-    viewer.entities.removeById(entityId)
-    if (selectedId === null) return
+    const orbit = orbitEntityRef.current
+    const trail = satelliteTrailEntityRef.current
+    if (!orbitsEnabled || selectedId === null) {
+      if (orbit) orbit.show = false
+      if (trail) trail.show = false
+      return
+    }
 
     const satrec = satrecs.get(selectedId)
-    if (!satrec) return
+    if (!satrec) {
+      if (orbit) orbit.show = false
+      if (trail) trail.show = false
+      return
+    }
 
     const positions = sampleOrbit(satrec, simulatedAt).map((state) =>
       Cartesian3.fromDegrees(state.longitudeDeg, state.latitudeDeg, toCesiumHeightMeters(state.altitudeKm)),
     )
 
     if (positions.length > 1) {
-      viewer.entities.add({
-        id: entityId,
+      const orbitPositions = orbitPositionsRef.current ?? new ConstantProperty(positions)
+      const orbitEntity = orbitEntityRef.current ?? viewer.entities.add({
+        id: 'selected-orbit',
         polyline: {
-          positions,
+          positions: orbitPositions,
           width: 1.5,
           material: Color.CYAN.withAlpha(0.7),
+          depthFailMaterial: Color.CYAN.withAlpha(0.2),
+          show: true,
         },
       })
+      orbitPositionsRef.current = orbitPositions
+      orbitEntityRef.current = orbitEntity
+      orbitEntity.show = true
+      orbitPositions.setValue(positions)
     }
-  }, [satrecs, selectedId])
+    if (satelliteTrailsEnabled) {
+      const trailPositions = sampleOrbit(satrec, new Date(simulatedAt.getTime() - 90_000), 3, 10).map((state) =>
+        Cartesian3.fromDegrees(state.longitudeDeg, state.latitudeDeg, toCesiumHeightMeters(state.altitudeKm)),
+      )
+      if (trailPositions.length > 1) {
+        const trailPositionsProperty = satelliteTrailPositionsRef.current ?? new ConstantProperty(trailPositions)
+        const trailEntity = satelliteTrailEntityRef.current ?? viewer.entities.add({
+          id: 'selected-satellite-trail',
+          polyline: {
+            positions: trailPositionsProperty,
+            width: 3,
+            material: Color.fromCssColorString('#a9edff').withAlpha(0.38),
+            depthFailMaterial: Color.fromCssColorString('#a9edff').withAlpha(0.14),
+            show: true,
+          },
+        })
+        satelliteTrailPositionsRef.current = trailPositionsProperty
+        satelliteTrailEntityRef.current = trailEntity
+        trailEntity.show = true
+        trailPositionsProperty.setValue(trailPositions)
+      } else if (satelliteTrailEntityRef.current) {
+        satelliteTrailEntityRef.current.show = false
+      }
+    } else if (satelliteTrailEntityRef.current) {
+      satelliteTrailEntityRef.current.show = false
+    }
+  }, [satrecs, selectedId, orbitsEnabled, satelliteTrailsEnabled])
 
   return <div className="globe" ref={containerRef} />
 }

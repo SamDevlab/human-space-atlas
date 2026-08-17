@@ -1,7 +1,9 @@
 import type { CatalogGroup, CatalogResponse } from './types'
 import type { RawEarthEvent } from './earthEvents'
+import type { AircraftResponse } from './airTraffic'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
+  ?? (typeof window !== 'undefined' && window.location.hostname !== 'localhost' ? '' : 'http://localhost:8787')
 
 export async function fetchCatalog(group: CatalogGroup, signal?: AbortSignal): Promise<CatalogResponse> {
   const response = await fetch(`${API_BASE_URL}/api/catalog?group=${encodeURIComponent(group)}`, { signal })
@@ -20,4 +22,19 @@ export async function fetchEarthEvents(signal?: AbortSignal): Promise<{ events: 
   }
   const payload = await response.json() as { events?: RawEarthEvent[]; fetchedAt?: string; cache?: 'hit' | 'miss' }
   return { events: Array.isArray(payload.events) ? payload.events : [], fetchedAt: payload.fetchedAt ?? new Date().toISOString(), cache: payload.cache === 'hit' ? 'hit' : 'miss' }
+}
+
+export async function fetchAircraftStates(limit = 180, signal?: AbortSignal): Promise<AircraftResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/aircraft/states?limit=${encodeURIComponent(limit)}`, { signal })
+  if (!response.ok) {
+    const message = await response.text().catch(() => '')
+    throw new Error(`Falha ao carregar tráfego aéreo (${response.status}). ${message}`.trim())
+  }
+  const payload = await response.json() as { states?: AircraftResponse['states']; fetchedAt?: string; cache?: 'hit' | 'miss' }
+  return {
+    source: 'opensky',
+    fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
+    cache: payload.cache === 'hit' ? 'hit' : 'miss',
+    states: Array.isArray(payload.states) ? payload.states.slice(0, Math.max(1, Math.min(500, Math.floor(limit)))) : [],
+  }
 }

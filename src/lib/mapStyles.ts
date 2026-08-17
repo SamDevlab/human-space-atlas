@@ -24,8 +24,10 @@ export function discoverMapStyles(): MapStyleDefinition[] {
   const discover = (Cesium as typeof Cesium & { createDefaultImageryProviderViewModels?: () => ProviderViewModel[] }).createDefaultImageryProviderViewModels
   if (!discover) return [{ id: 'satellite', name: 'Satellite', tooltip: 'Human Space Atlas default satellite imagery', isDefault: true }]
   const models = discover()
+  const satelliteModel = models.find((model) => model.name === 'ArcGIS World Imagery')
+  const satelliteCreate = satelliteModel?.creationCommand as unknown as (() => ImageryProvider | ImageryProvider[] | Promise<ImageryProvider | ImageryProvider[]>) | undefined
   return [
-    { id: 'satellite', name: 'Satellite', tooltip: 'Human Space Atlas default satellite imagery', isDefault: true },
+    { id: 'satellite', name: 'Satellite', tooltip: 'Human Space Atlas default satellite imagery', isDefault: true, create: satelliteCreate },
     ...models.filter((model) => USABLE_CESIUM_NAMES.has(model.name)).map((model) => ({
       id: stableId(model.name),
       name: model.name.replace(/[\u00ad\u00a0]/g, ' '),

@@ -4,25 +4,26 @@ import { Globe } from './components/Globe'
 import { ExplorationHud } from './components/ExplorationHud'
 import { ExploreNav } from './components/ExploreNav'
 import { ExploreSettings } from './components/ExploreSettings'
+import { AtlasSettings } from './components/AtlasSettings'
 import { PerformanceOverlay } from './components/PerformanceOverlay'
-import { fetchCatalog, fetchEarthEvents } from './lib/api'
+import { fetchAircraftStates, fetchCatalog, fetchEarthEvents } from './lib/api'
 import { createSatrec, getOrbitState, toCesiumHeightMeters } from './lib/orbit'
 import { advanceSimulatedTime } from './lib/simulationClock'
 import { filterCatalog, normalizeCatalog } from './lib/orbitalCatalog'
 import { generateSyntheticCatalog } from './lib/syntheticCatalog'
 import { discoverMapStyles } from './lib/mapStyles'
-import { NASA_GIBS_CLOUD_SOURCE } from './lib/earthLayers'
 import { EARTH_EVENT_CATEGORIES, normalizeEarthEvents } from './lib/earthEvents'
 import type { EarthEvent } from './lib/earthEvents'
 import { AutoRenderController, resolveRenderLimit, selectRenderSet, type RenderMode, RENDER_LIMITS } from './lib/renderSet'
 import type { CatalogGroup, OmmRecord } from './lib/types'
-import type { ExplorationHudSnapshot } from './exploration/types'
+import type { ExplorationCameraPreset, ExplorationHudSnapshot } from './exploration/types'
+import type { AircraftState } from './lib/airTraffic'
 
 const GROUPS: Array<{ value: CatalogGroup; label: string }> = [
-  { value: 'stations', label: 'Stations' },
-  { value: 'active', label: 'Active Satellites' },
+  { value: 'stations', label: 'Estações' },
+  { value: 'active', label: 'Satélites ativos' },
   { value: 'starlink', label: 'Starlink' },
-  { value: 'gps-ops', label: 'GPS' },
+  { value: 'gps-ops', label: 'GPS operacional' },
 ]
 
 const SPEEDS = [0, 1, 10, 100]
@@ -46,23 +47,40 @@ function App() {
   const [mapStyle, setMapStyle] = useState(() => { const saved = localStorage.getItem('human-space-atlas.map-style-v2'); return saved && mapStyles.some((style) => style.id === saved) ? saved : 'satellite' })
   const [mapStyleLoading, setMapStyleLoading] = useState(false)
   const [cloudsEnabled, setCloudsEnabled] = useState(() => localStorage.getItem('human-space-atlas.clouds-enabled') !== '0')
-  const [cloudOpacity, setCloudOpacity] = useState(() => Number(localStorage.getItem('human-space-atlas.cloud-opacity') ?? 0.55))
+  const [cloudOpacity, setCloudOpacity] = useState(() => {
+    const saved = Number(localStorage.getItem('human-space-atlas.cloud-opacity'))
+    return Number.isFinite(saved) ? Math.min(0.7, Math.max(0, saved)) : 0.55
+  })
+  const [cloudShadowsEnabled, setCloudShadowsEnabled] = useState(() => localStorage.getItem('human-space-atlas.cloud-shadows-enabled') !== '0')
+  const [atmosphereEnabled, setAtmosphereEnabled] = useState(() => localStorage.getItem('human-space-atlas.atmosphere-enabled') !== '0')
+  const [terrainEnabled, setTerrainEnabled] = useState(() => localStorage.getItem('human-space-atlas.terrain-enabled') !== '0')
+  const [orbitsEnabled, setOrbitsEnabled] = useState(false)
+  const [satelliteTrailsEnabled, setSatelliteTrailsEnabled] = useState(() => localStorage.getItem('human-space-atlas.satellite-trails-enabled') === '1')
+  const [terrainLoading, setTerrainLoading] = useState(true)
+  const [aircraftEnabled, setAircraftEnabled] = useState(() => localStorage.getItem('human-space-atlas.aircraft-enabled') !== '0')
+  const [aircraftRoutesEnabled, setAircraftRoutesEnabled] = useState(() => localStorage.getItem('human-space-atlas.aircraft-routes-enabled') !== '0')
+  const [aircraftDensity, setAircraftDensity] = useState(() => {
+    const saved = Number(localStorage.getItem('human-space-atlas.aircraft-density'))
+    return Number.isFinite(saved) ? Math.min(300, Math.max(25, Math.round(saved / 25) * 25)) : 125
+  })
+  const [aircraftStates, setAircraftStates] = useState<AircraftState[]>([])
+  const [selectedAircraftId, setSelectedAircraftId] = useState<string | null>(null)
   const [earthEventsEnabled, setEarthEventsEnabled] = useState(() => localStorage.getItem('human-space-atlas.earth-events-enabled') !== '0')
   const [eventCategories, setEventCategories] = useState<string[]>(() => EARTH_EVENT_CATEGORIES.map((category) => category.id))
   const [earthEvents, setEarthEvents] = useState<EarthEvent[]>([])
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
   const [eventViewRequest, setEventViewRequest] = useState(0)
   const [eventViewPosition, setEventViewPosition] = useState<Cartesian3 | null>(null)
-  const [explorationActive, setExplorationActive] = useState(false)
-  const [autopilotAction, setAutopilotAction] = useState<'ENGAGE' | 'CANCEL' | null>(null)
-  const [autopilotRequest, setAutopilotRequest] = useState(0)
+  const [explorationActive, setExplorationActive] = useState(true)
+  const [exploreUiOpen, setExploreUiOpen] = useState(false)
   const [exploreNavOpen, setExploreNavOpen] = useState(false)
   const [exploreNavQuery, setExploreNavQuery] = useState('')
   const [exploreSettingsOpen, setExploreSettingsOpen] = useState(false)
-  const [exploreSteeringSensitivity, setExploreSteeringSensitivity] = useState(() => Number(localStorage.getItem('human-space-atlas.explore-steering-sensitivity') ?? 1))
   const [exploreCameraSensitivity, setExploreCameraSensitivity] = useState(() => Number(localStorage.getItem('human-space-atlas.explore-camera-sensitivity') ?? 1))
-  const [exploreControlsVisible, setExploreControlsVisible] = useState(() => localStorage.getItem('human-space-atlas.explore-controls-seen') !== '1')
-  const [explorationHud, setExplorationHud] = useState<ExplorationHudSnapshot>({ altitudeKm: 0, speedKmS: 0, throttle: 0, cameraMode: 'THIRD_PERSON', cameraDistanceMeters: 7500, cameraOrbiting: false, flightAssist: true, boostActive: false, lowAltitude: false, targetName: null, targetDistanceKm: null, targetIndicator: null, autopilot: { mode: 'OFF', targetName: null, distanceKm: null, relativeSpeedKmS: null, etaSeconds: null }, debugFlight: { mouseDx: 0, mouseDy: 0, yawRate: 0, pitchRate: 0, rollRate: 0, throttle: 0, velocity: Cartesian3.ZERO, forward: Cartesian3.UNIT_X, orientation: Quaternion.IDENTITY, pointerLock: false } })
+  const [exploreCameraPreset, setExploreCameraPreset] = useState<ExplorationCameraPreset>(() => (localStorage.getItem('human-space-atlas.explore-camera-preset') as ExplorationCameraPreset | null) ?? 'FOLLOW')
+  const [exploreControlsVisible, setExploreControlsVisible] = useState(false)
+  const [exploreObjectMarkerEnabled, setExploreObjectMarkerEnabled] = useState(() => localStorage.getItem('human-space-atlas.explore-object-marker') !== '0')
+  const [explorationHud, setExplorationHud] = useState<ExplorationHudSnapshot>({ altitudeKm: 0, speedKmS: 0, throttle: 0, cameraMode: 'THIRD_PERSON', cameraDistanceMeters: 7500, cameraOrbiting: false, flightAssist: true, boostActive: false, lowAltitude: false, targetName: null, targetDistanceKm: null, targetIndicator: null, debugFlight: { mouseDx: 0, mouseDy: 0, yawRate: 0, pitchRate: 0, rollRate: 0, throttle: 0, velocity: Cartesian3.ZERO, forward: Cartesian3.UNIT_X, orientation: Quaternion.IDENTITY, pointerLock: false } })
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [status, setStatus] = useState('Carregando catálogo…')
   const [error, setError] = useState<string | null>(null)
@@ -75,14 +93,11 @@ function App() {
   const onMapStyleError = useCallback(() => { setMapStyle('satellite'); setMapStyleLoading(false) }, [])
   const onMapStyleLoading = useCallback((loading: boolean) => setMapStyleLoading(loading), [])
   const onCloudError = useCallback(() => setCloudsEnabled(false), [])
+  const onTerrainLoading = useCallback((loading: boolean) => setTerrainLoading(loading), [])
   const onExplorationHud = useCallback((snapshot: ExplorationHudSnapshot) => setExplorationHud(snapshot), [])
-  const onExitExplore = useCallback(() => { setExploreNavOpen(false); setExploreSettingsOpen(false); setExplorationActive(false) }, [])
-  const onOpenExploreNav = useCallback(() => { setExploreSettingsOpen(false); setExploreNavOpen(true) }, [])
-  const onOpenExploreSettings = useCallback(() => { setExploreNavOpen(false); setExploreSettingsOpen(true) }, [])
-  const requestAutopilot = useCallback((action: 'ENGAGE' | 'CANCEL') => {
-    setAutopilotAction(action)
-    setAutopilotRequest((request) => request + 1)
-  }, [])
+  const onExitExplore = useCallback(() => { setExploreNavOpen(false); setExploreSettingsOpen(false); setExploreUiOpen(false); setExplorationActive(false) }, [])
+  const onOpenExploreNav = useCallback(() => { setExploreUiOpen(true); setExploreSettingsOpen(false); setExploreNavOpen(true) }, [])
+  const onOpenExploreSettings = useCallback(() => { setExploreUiOpen(true); setExploreNavOpen(false); setExploreSettingsOpen(true) }, [])
   const onExploreActivity = useCallback(() => {
     setExploreControlsVisible((visible) => {
       if (visible) localStorage.setItem('human-space-atlas.explore-controls-seen', '1')
@@ -114,9 +129,18 @@ function App() {
   useEffect(() => { localStorage.setItem('human-space-atlas.map-style-v2', mapStyle) }, [mapStyle])
   useEffect(() => { localStorage.setItem('human-space-atlas.clouds-enabled', cloudsEnabled ? '1' : '0') }, [cloudsEnabled])
   useEffect(() => { localStorage.setItem('human-space-atlas.cloud-opacity', String(cloudOpacity)) }, [cloudOpacity])
+  useEffect(() => { localStorage.setItem('human-space-atlas.cloud-shadows-enabled', cloudShadowsEnabled ? '1' : '0') }, [cloudShadowsEnabled])
+  useEffect(() => { localStorage.setItem('human-space-atlas.atmosphere-enabled', atmosphereEnabled ? '1' : '0') }, [atmosphereEnabled])
+  useEffect(() => { localStorage.setItem('human-space-atlas.terrain-enabled', terrainEnabled ? '1' : '0') }, [terrainEnabled])
+  useEffect(() => { localStorage.setItem('human-space-atlas.orbits-enabled', orbitsEnabled ? '1' : '0') }, [orbitsEnabled])
+  useEffect(() => { localStorage.setItem('human-space-atlas.satellite-trails-enabled', satelliteTrailsEnabled ? '1' : '0') }, [satelliteTrailsEnabled])
+  useEffect(() => { localStorage.setItem('human-space-atlas.aircraft-enabled', aircraftEnabled ? '1' : '0') }, [aircraftEnabled])
+  useEffect(() => { localStorage.setItem('human-space-atlas.aircraft-routes-enabled', aircraftRoutesEnabled ? '1' : '0') }, [aircraftRoutesEnabled])
+  useEffect(() => { localStorage.setItem('human-space-atlas.aircraft-density', String(aircraftDensity)) }, [aircraftDensity])
   useEffect(() => { localStorage.setItem('human-space-atlas.earth-events-enabled', earthEventsEnabled ? '1' : '0') }, [earthEventsEnabled])
-  useEffect(() => { localStorage.setItem('human-space-atlas.explore-steering-sensitivity', String(exploreSteeringSensitivity)) }, [exploreSteeringSensitivity])
   useEffect(() => { localStorage.setItem('human-space-atlas.explore-camera-sensitivity', String(exploreCameraSensitivity)) }, [exploreCameraSensitivity])
+  useEffect(() => { localStorage.setItem('human-space-atlas.explore-camera-preset', exploreCameraPreset) }, [exploreCameraPreset])
+  useEffect(() => { localStorage.setItem('human-space-atlas.explore-object-marker', exploreObjectMarkerEnabled ? '1' : '0') }, [exploreObjectMarkerEnabled])
   useEffect(() => {
     if (renderMode === 'AUTO') setAutoLimit(autoControllerRef.current.update(performanceMetric, performance.now()))
   }, [performanceMetric, renderMode])
@@ -162,6 +186,28 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!aircraftEnabled) {
+      setAircraftStates([])
+      return
+    }
+    const controller = new AbortController()
+    let timer: number | null = null
+    let active = true
+    const refresh = () => {
+      fetchAircraftStates(aircraftDensity, controller.signal)
+        .then((payload) => { if (active) setAircraftStates(payload.states) })
+        .catch(() => { if (active) setAircraftStates([]) })
+    }
+    refresh()
+    timer = window.setInterval(refresh, 15_000)
+    return () => {
+      active = false
+      controller.abort()
+      if (timer !== null) window.clearInterval(timer)
+    }
+  }, [aircraftEnabled, aircraftDensity])
+
+  useEffect(() => {
     const startedReal = Date.now()
     const startedSim = simulatedAt.getTime()
 
@@ -174,6 +220,10 @@ function App() {
   }, [speed])
 
   const catalogEntries = useMemo(() => normalizeCatalog(objects).entries, [objects])
+  useEffect(() => {
+    if (!explorationActive || selectedId !== null || catalogEntries.length === 0) return
+    setSelectedId(catalogEntries[0].noradNumericId)
+  }, [catalogEntries, explorationActive, selectedId])
   const filteredEntries = useMemo(() => filterCatalog(catalogEntries, objectKind, objectQuery), [catalogEntries, objectKind, objectQuery])
   const exploreNavEntries = useMemo(() => filterCatalog(catalogEntries, 'ALL', exploreNavQuery).map((entry) => entry.omm), [catalogEntries, exploreNavQuery])
   const renderLimit = resolveRenderLimit(renderMode, filteredEntries.length, autoLimit, customLimit)
@@ -187,6 +237,7 @@ function App() {
     [catalogEntries, selectedId],
   )
   const selectedEvent = useMemo(() => earthEvents.find((event) => event.id === selectedEventId) ?? null, [earthEvents, selectedEventId])
+  const selectedAircraft = useMemo(() => aircraftStates.find((aircraft) => aircraft.icao24 === selectedAircraftId) ?? null, [aircraftStates, selectedAircraftId])
 
   const selectedState = useMemo(() => {
     if (!selected) return null
@@ -224,10 +275,15 @@ function App() {
   }
 
   function enterExploration() {
+    if (selectedId === null) {
+      const defaultTarget = catalogEntries[0]?.noradNumericId
+      if (defaultTarget !== undefined) setSelectedId(defaultTarget)
+    }
     setSettingsOpen(false)
     setSearchFocused(false)
     setExploreNavOpen(false)
     setExploreSettingsOpen(false)
+    setExploreUiOpen(false)
     setExplorationActive(true)
   }
 
@@ -236,10 +292,23 @@ function App() {
     setExploreNavOpen(false)
   }
 
-  function selectEarthEvent(eventId: string | null) {
+  const selectEarthEvent = useCallback((eventId: string | null) => {
     setSelectedEventId(eventId)
     if (eventId) setSelectedId(null)
-  }
+    if (eventId) setSelectedAircraftId(null)
+  }, [])
+
+  const selectAircraft = useCallback((aircraftId: string | null) => {
+    setSelectedAircraftId(aircraftId)
+    if (aircraftId) {
+      setSelectedId(null)
+      setSelectedEventId(null)
+    }
+  }, [])
+
+  const updateEventCategory = useCallback((categoryId: string, enabled: boolean) => {
+    setEventCategories((categories) => enabled ? [...new Set([...categories, categoryId])] : categories.filter((category) => category !== categoryId))
+  }, [])
 
   function viewSelectedEvent() {
     if (!selectedEvent) return
@@ -260,7 +329,18 @@ function App() {
         mapStyle={mapStyle}
         cloudsEnabled={cloudsEnabled}
         cloudOpacity={cloudOpacity}
+        cloudShadowsEnabled={cloudShadowsEnabled}
+        atmosphereEnabled={atmosphereEnabled}
+        terrainEnabled={terrainEnabled}
+        orbitsEnabled={orbitsEnabled}
+        satelliteTrailsEnabled={satelliteTrailsEnabled}
         onCloudError={onCloudError}
+        onTerrainLoading={onTerrainLoading}
+        aircraftEnabled={aircraftEnabled}
+        aircraftRoutesEnabled={aircraftRoutesEnabled}
+        aircraftStates={aircraftStates}
+        selectedAircraftId={selectedAircraftId}
+        onAircraftSelect={selectAircraft}
         earthEvents={earthEvents}
         earthEventsEnabled={earthEventsEnabled}
         eventCategories={eventCategories}
@@ -273,34 +353,32 @@ function App() {
         targetPosition={targetPosition}
         targetVelocity={targetVelocity}
         targetName={selected?.OBJECT_NAME ?? null}
-        autopilotAction={autopilotAction}
-        autopilotRequest={autopilotRequest}
         onExplorationHud={onExplorationHud}
         onExitExplore={onExitExplore}
         onOpenExploreNav={onOpenExploreNav}
         onExploreActivity={onExploreActivity}
-        explorationSteeringSensitivity={exploreSteeringSensitivity}
         explorationCameraSensitivity={exploreCameraSensitivity}
+        explorationCameraPreset={exploreCameraPreset}
       />
       {new URLSearchParams(window.location.search).get('debug') === 'perf' && <PerformanceOverlay loaded={objects.length} visible={visibleObjects.length} {...performanceMetric} />}
 
       <header className="topbar glass">
         <button className="brand" onClick={() => { setSelectedId(null); setObjectQuery('') }} aria-label="Human Space Atlas home"><span className="brand-mark">◉</span><span>HUMAN SPACE ATLAS</span></button>
-        <button className="mode-toggle" onClick={explorationActive ? onExitExplore : enterExploration}>{explorationActive ? 'ATLAS' : 'EXPLORE'}</button>
-        <div className="search-wrap"><span className="search-icon">⌕</span><input ref={searchInputRef} aria-label="Search satellites" placeholder="Search satellites or NORAD ID..." value={objectQuery} onFocus={() => { setSearchFocused(true); setSettingsOpen(false) }} onChange={(event) => { setObjectQuery(event.target.value); setSearchFocused(true) }} />{objectQuery && <button className="clear-search" onClick={() => { setObjectQuery(''); searchInputRef.current?.focus() }} aria-label="Clear search">×</button>}<kbd>⌘ K</kbd>
+        <button className="mode-toggle" onClick={explorationActive ? onExitExplore : enterExploration}>{explorationActive ? 'ATLAS' : 'EXPLORAR'}</button>
+        <div className="search-wrap"><span className="search-icon">⌕</span><input ref={searchInputRef} aria-label="Pesquisar satélites" placeholder="Pesquisar satélites ou ID NORAD…" value={objectQuery} onFocus={() => { setSearchFocused(true); setSettingsOpen(false) }} onChange={(event) => { setObjectQuery(event.target.value); setSearchFocused(true) }} />{objectQuery && <button className="clear-search" onClick={() => { setObjectQuery(''); searchInputRef.current?.focus() }} aria-label="Limpar pesquisa">×</button>}<kbd>⌘ K</kbd>
           {searchFocused && objectQuery && <div className="search-dropdown">{filteredEntries.slice(0, 8).map((entry) => <button key={entry.id} onClick={() => { setSelectedId(entry.noradNumericId); setSearchFocused(false) }}><strong>{entry.name}</strong><span>NORAD {entry.noradId} · {entry.objectType}</span></button>)}</div>}
         </div>
         <div className="live-status">
           <span className="live-dot" />
-          <div><strong>{objects.length ? 'LIVE' : 'CONNECTING'}</strong><span>{objects.length.toLocaleString('en-US')} objects</span></div>
+          <div><strong>{objects.length ? 'AO VIVO' : 'CONECTANDO'}</strong><span>{objects.length.toLocaleString('pt-BR')} objetos</span></div>
         </div>
-        <button className="icon-button" onClick={() => { setSettingsOpen((open) => !open); setSearchFocused(false) }} aria-label="Open settings" title="Settings">⚙</button>
+        <button className="icon-button" onClick={() => { setSettingsOpen((open) => !open); setSearchFocused(false) }} aria-label="Abrir configurações" title="Configurações">⚙</button>
       </header>
 
       {explorerOpen ? <aside className="filters glass">
-        <button className="collapse-button" onClick={() => setExplorerOpen((open) => !open)} aria-label={explorerOpen ? 'Collapse explorer' : 'Open explorer'}>{explorerOpen ? '‹' : '☰'}</button>
+        <button className="collapse-button" onClick={() => setExplorerOpen((open) => !open)} aria-label={explorerOpen ? 'Recolher painel de exploração' : 'Abrir painel de exploração'}>{explorerOpen ? '‹' : '☰'}</button>
         {explorerOpen && <>
-        <span className="panel-title">Explore</span>
+        <span className="panel-title">Explorar</span>
         <div className="nav-list">
           {GROUPS.map((item) => (
             <button
@@ -312,23 +390,68 @@ function App() {
             </button>
           ))}
         </div>
-        <span className="panel-title section-label">Object Type</span>
+        <span className="panel-title section-label">Tipo de objeto</span>
         <div className="nav-list type-list">
-          {(['ALL', 'PAYLOAD', 'ROCKET BODY', 'DEBRIS']).map((kind) => <button key={kind} className={objectKind === kind ? 'active' : ''} onClick={() => setObjectKind(kind)}><span className="nav-icon">{kind === 'ALL' ? '●' : '◇'}</span>{kind === 'ALL' ? 'All Objects' : kind === 'ROCKET BODY' ? 'Rocket Body' : kind[0] + kind.slice(1).toLowerCase()}</button>)}
+          {(['ALL', 'PAYLOAD', 'ROCKET BODY', 'DEBRIS']).map((kind) => <button key={kind} className={objectKind === kind ? 'active' : ''} onClick={() => setObjectKind(kind)}><span className="nav-icon">{kind === 'ALL' ? '●' : '◇'}</span>{kind === 'ALL' ? 'Todos os objetos' : kind === 'PAYLOAD' ? 'Carga útil' : kind === 'ROCKET BODY' ? 'Corpo de foguete' : 'Detritos'}</button>)}
         </div>
-        <p className="microcopy">OMM / JSON · local SGP4 propagation</p>
-        {error && <div className="error-box">Unable to update orbital catalog<br /><small>Using cached data</small></div>}
+        <p className="microcopy">OMM / JSON · propagação SGP4 local</p>
+        <div className="atlas-status" aria-label="Status do atlas">
+          <div className="status-line"><span className="live-dot" /> <strong>{filteredEntries.length.toLocaleString('pt-BR')} / {objects.length.toLocaleString('pt-BR')}</strong> objetos exibidos</div>
+          <button className={earthEventsEnabled ? 'status-action active' : 'status-action'} onClick={() => setEarthEventsEnabled((enabled) => !enabled)}><span className="status-mark event-mark" /> Eventos da Terra · {earthEvents.length.toLocaleString('pt-BR')} <b>{earthEventsEnabled ? 'ATIVOS' : 'OCULTOS'}</b></button>
+          <div className="status-line aircraft-status"><span className="aircraft-mark">✈</span> Aeronaves · {aircraftEnabled ? `${aircraftStates.length.toLocaleString('pt-BR')} ao vivo` : 'ocultas'}</div>
+          <div className="status-line terrain-status"><span className={terrainLoading ? 'status-spinner' : 'status-mark terrain-mark'} /> {terrainLoading ? 'Elevação carregando…' : terrainEnabled ? 'Relevo 3D pronto' : 'Relevo 3D oculto'}</div>
+          <div className="map-legend" aria-label="Legenda visual"><span><i className="legend-line orbit-legend" /> Órbita</span><span><i className="legend-dot event-legend" /> Evento</span><span><i className="legend-dot aircraft-legend" /> Aeronave</span></div>
+        </div>
+        {error && <div className="error-box">Não foi possível atualizar o catálogo orbital<br /><small>Usando dados em cache</small></div>}
         </>}
-      </aside> : <button className="explorer-rail glass" onClick={() => setExplorerOpen(true)} aria-label="Open explorer" title="Open explorer">☰</button>}
+      </aside> : <button className="explorer-rail glass" onClick={() => setExplorerOpen(true)} aria-label="Abrir painel de exploração" title="Abrir painel de exploração">☰</button>}
 
-      <div className="catalog-counts glass"><span className="live-dot" /> {filteredEntries.length.toLocaleString('en-US')} / {objects.length.toLocaleString('en-US')} objects <small>displayed</small></div>
-      {earthEventsEnabled && <div className="event-count glass"><span className="live-dot" /> EARTH EVENTS <b>{earthEvents.length} active</b></div>}
-
-      {settingsOpen && <section className="settings-popover glass"><div className="popover-heading"><span className="panel-title">Settings</span><button className="close-button" onClick={() => setSettingsOpen(false)}>×</button></div><span className="panel-title section-label">View</span><button className="home-setting" onClick={() => setHomeRequest((request) => request + 1)} aria-label="Home"><span>⌂</span><div><strong>Home</strong><small>Return to Earth overview</small></div></button><span className="panel-title section-label">Map style {mapStyleLoading && <span className="map-loading"><span /> Loading map</span>}</span><div className="map-style-list">{mapStyles.map((style) => <button key={style.id} className={mapStyle === style.id ? 'active' : ''} onClick={() => selectMapStyle(style.id)} title={style.tooltip}><span className={`map-preview ${style.id === 'satellite' ? 'satellite-preview' : style.id === 'openstreetmap' ? 'map-preview-osm' : 'map-preview-generic'}`} style={style.iconUrl ? { backgroundImage: `url(${style.iconUrl})` } : undefined} /><div><strong>{style.name}</strong><small>{style.isDefault ? 'DEFAULT' : mapStyle === style.id ? 'SELECTED' : style.name === 'Natural Earth II' ? 'Atlas map' : style.name === 'OpenStreetMap' ? 'Street map' : 'Imagery'}</small></div>{mapStyle === style.id && <span className="map-check">✓</span>}</button>)}</div><span className="panel-title section-label">Earth layers</span><label className="layer-toggle"><input type="checkbox" checked={cloudsEnabled} onChange={(event) => setCloudsEnabled(event.target.checked)} /><span><strong>Clouds</strong><small>{NASA_GIBS_CLOUD_SOURCE}</small></span><b>{cloudsEnabled ? 'ON' : 'OFF'}</b></label><label className="small-control">Cloud opacity · {Math.round(cloudOpacity * 100)}%<input type="range" min="0" max="1" step="0.05" value={cloudOpacity} onChange={(event) => setCloudOpacity(Number(event.target.value))} /></label><p className="microcopy">CINEMATIC ATMOSPHERE<br />Cloud field is independent of simulated time.</p><span className="panel-title section-label">Earth events</span><label className="layer-toggle"><input type="checkbox" checked={earthEventsEnabled} onChange={(event) => setEarthEventsEnabled(event.target.checked)} /><span><strong>Earth Events</strong><small>NASA EONET v3 · {earthEvents.length} active</small></span><b>{earthEventsEnabled ? 'ON' : 'OFF'}</b></label><div className="event-category-list">{EARTH_EVENT_CATEGORIES.map((category) => <label key={category.id}><input type="checkbox" checked={eventCategories.includes(category.id)} onChange={(event) => setEventCategories((current) => event.target.checked ? [...new Set([...current, category.id])] : current.filter((id) => id !== category.id))} /><span>{category.label}</span></label>)}</div><span className="panel-title section-label">Rendering density</span><div className="density-list">{(['AUTO', '1000', '2500', '5000', '10000', '25000', 'MAXIMUM'] as RenderMode[]).map((mode) => <button key={mode} className={renderMode === mode ? 'active' : ''} onClick={() => setRenderMode(mode)}><span>{mode === 'AUTO' ? 'Automatic' : mode === 'MAXIMUM' ? 'Maximum' : Number(mode).toLocaleString('en-US')}</span><small>{mode === 'AUTO' ? 'Recommended' : mode === '1000' ? 'Low' : mode === '5000' ? 'Balanced' : mode === '10000' ? 'High' : mode === '25000' ? 'Ultra' : ''}</small></button>)}</div><label className="small-control">Custom · {customLimit.toLocaleString('en-US')} objects<input type="range" min="1000" max="50000" step="500" value={customLimit} onChange={(event) => { setCustomLimit(Number(event.target.value)); setRenderMode('CUSTOM') }} /></label><p className="microcopy">Catalog: {objects.length.toLocaleString('en-US')} · Displayed: {visibleObjects.length.toLocaleString('en-US')}<br />The complete catalog remains searchable.</p>{renderLimit >= 25000 && <p className="warning-copy">High object densities may reduce performance.</p>}</section>}
+      {settingsOpen && <AtlasSettings
+        mapStyles={mapStyles}
+        mapStyle={mapStyle}
+        mapStyleLoading={mapStyleLoading}
+        onMapStyleSelect={selectMapStyle}
+        onHome={() => { setHomeRequest((request) => request + 1); setSettingsOpen(false) }}
+        cloudsEnabled={cloudsEnabled}
+        cloudOpacity={cloudOpacity}
+        cloudShadowsEnabled={cloudShadowsEnabled}
+        atmosphereEnabled={atmosphereEnabled}
+        terrainEnabled={terrainEnabled}
+        orbitsEnabled={orbitsEnabled}
+        satelliteTrailsEnabled={satelliteTrailsEnabled}
+        onCloudsChange={setCloudsEnabled}
+        onCloudOpacityChange={setCloudOpacity}
+        onCloudShadowsChange={setCloudShadowsEnabled}
+        onAtmosphereChange={setAtmosphereEnabled}
+        onTerrainChange={setTerrainEnabled}
+        onOrbitsChange={setOrbitsEnabled}
+        onSatelliteTrailsChange={setSatelliteTrailsEnabled}
+        terrainLoading={terrainLoading}
+        aircraftEnabled={aircraftEnabled}
+        aircraftRoutesEnabled={aircraftRoutesEnabled}
+        aircraftDensity={aircraftDensity}
+        aircraftCount={aircraftStates.length}
+        onAircraftChange={setAircraftEnabled}
+        onAircraftRoutesChange={setAircraftRoutesEnabled}
+        onAircraftDensityChange={setAircraftDensity}
+        earthEventsEnabled={earthEventsEnabled}
+        earthEventCount={earthEvents.length}
+        eventCategories={eventCategories}
+        onEarthEventsChange={setEarthEventsEnabled}
+        onEventCategoryChange={updateEventCategory}
+        renderMode={renderMode}
+        customLimit={customLimit}
+        renderLimit={renderLimit}
+        objectCount={objects.length}
+        visibleCount={visibleObjects.length}
+        onRenderModeChange={setRenderMode}
+        onCustomLimitChange={setCustomLimit}
+        onClose={() => setSettingsOpen(false)}
+      />}
 
       <section className="time-controls glass">
         <div>
-          <span className="panel-title">Simulated Time</span>
+          <span className="panel-title">Tempo simulado</span>
           <strong>{simulatedAt.toLocaleString('en-GB', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' })} UTC</strong>
         </div>
         <div className="speed-row">
@@ -337,46 +460,59 @@ function App() {
               {value === 0 ? '❚❚' : `${value}×`}
             </button>
           ))}
-          <button onClick={jumpToNow} title="Return to real time">NOW</button>
+          <button onClick={jumpToNow} title="Voltar ao tempo real">AGORA</button>
         </div>
       </section>
 
-      <aside className={`details ${selected || selectedEvent ? 'glass inspector-open' : 'empty-inspector-panel'}`}>
+      <aside className={`details ${selected || selectedEvent || selectedAircraft ? 'glass inspector-open' : 'empty-inspector-panel'}`}>
         {selectedEvent ? (
           <>
-            <div className="inspector-heading"><p className="eyebrow">EARTH EVENT</p><button className="close-button" onClick={() => setSelectedEventId(null)}>×</button></div>
+            <div className="inspector-heading"><p className="eyebrow">EVENTO TERRESTRE</p><button className="close-button" onClick={() => setSelectedEventId(null)} aria-label="Fechar evento">×</button></div>
             <h2>{selectedEvent.title}</h2>
-            <div className="object-meta"><span className="live-dot" /> {selectedEvent.categoryTitle} <span>NASA EONET v3 · OPEN</span></div>
+            <div className="object-meta"><span className="live-dot" /> {selectedEvent.categoryTitle} <span>NASA EONET v3 · ATIVO</span></div>
             <dl>
-              <div><dt>LAST OBSERVATION</dt><dd>{selectedEvent.geometry.date?.slice(0, 10) ?? '—'}</dd></div><div><dt>MAGNITUDE</dt><dd>{selectedEvent.magnitudeValue !== null ? `${selectedEvent.magnitudeValue}${selectedEvent.magnitudeUnit ? ` ${selectedEvent.magnitudeUnit}` : ''}` : '—'}</dd></div>
-              <div><dt>SOURCE</dt><dd>{selectedEvent.source ?? '—'}</dd></div><div><dt>GEOMETRY</dt><dd>{selectedEvent.geometry.type}</dd></div>
+              <div><dt>ÚLTIMA OBSERVAÇÃO</dt><dd>{selectedEvent.geometry.date?.slice(0, 10) ?? '—'}</dd></div><div><dt>MAGNITUDE</dt><dd>{selectedEvent.magnitudeValue !== null ? `${selectedEvent.magnitudeValue}${selectedEvent.magnitudeUnit ? ` ${selectedEvent.magnitudeUnit}` : ''}` : '—'}</dd></div>
+              <div><dt>FONTE</dt><dd>{selectedEvent.source ?? '—'}</dd></div><div><dt>GEOMETRIA</dt><dd>{selectedEvent.geometry.type === 'Point' ? 'Ponto' : 'Área'}</dd></div>
             </dl>
             {selectedEvent.description && <p className="event-description">{selectedEvent.description}</p>}
-            <button className="clear-button" onClick={viewSelectedEvent}>View location</button>
+            <button className="clear-button" onClick={viewSelectedEvent}>Ver localização</button>
+          </>
+        ) : selectedAircraft ? (
+          <>
+            <div className="inspector-heading"><p className="eyebrow">AERONAVE AO VIVO</p><button className="close-button" onClick={() => setSelectedAircraftId(null)} aria-label="Fechar aeronave">×</button></div>
+            <h2>{selectedAircraft.callsign ?? selectedAircraft.icao24.toUpperCase()}</h2>
+            <div className="object-meta"><span className="live-dot" /> ADS-B · {selectedAircraft.originCountry ?? 'origem desconhecida'} <span>OPENSKY · AO VIVO</span></div>
+            <dl>
+              <div><dt>ALTITUDE</dt><dd>{(selectedAircraft.altitudeMeters / 1000).toFixed(1)} km</dd></div><div><dt>VELOCIDADE</dt><dd>{(selectedAircraft.velocityMetersPerSecond * 3.6).toFixed(0)} km/h</dd></div>
+              <div><dt>RUMO</dt><dd>{selectedAircraft.trueTrackDeg !== null ? `${selectedAircraft.trueTrackDeg.toFixed(0)}°` : '—'}</dd></div><div><dt>ICAO24</dt><dd>{selectedAircraft.icao24.toUpperCase()}</dd></div>
+            </dl>
+            <p className="event-description">O rastro recente desta aeronave está visível no mapa.</p>
+            <button className="clear-button" onClick={() => setSelectedAircraftId(null)}>Limpar seleção</button>
           </>
         ) : selected ? (
           <>
-            <div className="inspector-heading"><p className="eyebrow">OBJECT INSPECTOR</p><button className="close-button" onClick={() => setSelectedId(null)}>×</button></div>
+            <div className="inspector-heading"><p className="eyebrow">INSPEÇÃO DO OBJETO</p><button className="close-button" onClick={() => setSelectedId(null)} aria-label="Fechar objeto">×</button></div>
             <h2>{selected.OBJECT_NAME}</h2>
-            <div className="object-meta"><span className="live-dot" /> ACTIVE · {selected.OBJECT_TYPE} <span>NORAD {selected.NORAD_CAT_ID}</span></div>
+            <div className="object-meta"><span className="live-dot" /> ATIVO · {selected.OBJECT_TYPE} <span>NORAD {selected.NORAD_CAT_ID}</span></div>
             <dl>
-              <div><dt>ALTITUDE</dt><dd>{selectedState ? `${selectedState.altitudeKm.toFixed(0)} km` : '—'}</dd></div><div><dt>SPEED</dt><dd>{selectedState ? `${selectedState.speedKmS.toFixed(2)} km/s` : '—'}</dd></div>
-              <div><dt>INCLINATION</dt><dd>{selected.INCLINATION.toFixed(2)}°</dd></div><div><dt>NORAD ID</dt><dd>{selected.NORAD_CAT_ID}</dd></div>
-              <div><dt>OBJECT ID</dt><dd>{selected.OBJECT_ID ?? '—'}</dd></div><div><dt>EPOCH</dt><dd>{selected.EPOCH.slice(0, 10)}</dd></div>
+              <div><dt>ALTITUDE</dt><dd>{selectedState ? `${selectedState.altitudeKm.toFixed(0)} km` : '—'}</dd></div><div><dt>VELOCIDADE</dt><dd>{selectedState ? `${selectedState.speedKmS.toFixed(2)} km/s` : '—'}</dd></div>
+              <div><dt>INCLINAÇÃO</dt><dd>{selected.INCLINATION.toFixed(2)}°</dd></div><div><dt>ID NORAD</dt><dd>{selected.NORAD_CAT_ID}</dd></div>
+              <div><dt>ID DO OBJETO</dt><dd>{selected.OBJECT_ID ?? '—'}</dd></div><div><dt>ÉPOCA</dt><dd>{selected.EPOCH.slice(0, 10)}</dd></div>
             </dl>
-            <button className="clear-button" onClick={() => setSelectedId(null)}>Clear selection</button>
+            <button className="clear-button" onClick={() => setSelectedId(null)}>Limpar seleção</button>
           </>
         ) : (
           <>
-            <div className="empty-inspector"><span>✦</span><p>Click an object to inspect</p><small>Explore Earth's orbital environment</small></div>
+            <div className="empty-inspector"><span>✦</span><p>Clique em um objeto para inspecionar</p><small>Explore o ambiente orbital da Terra</small></div>
           </>
         )}
       </aside>
 
-      <footer className="source-note">CelesTrak · OMM / JSON · SGP4 · CesiumJS</footer>
-      {explorationActive && <ExplorationHud snapshot={explorationHud} debugFlight={debugFlight} onExit={onExitExplore} onOpenNav={onOpenExploreNav} onOpenSettings={onOpenExploreSettings} onEngageAutopilot={() => requestAutopilot('ENGAGE')} onCancelAutopilot={() => requestAutopilot('CANCEL')} controlsHelpVisible={exploreControlsVisible} onDismissHelp={dismissExploreControls} />}
+      <footer className="source-note">CelesTrak · OpenSky ADS-B · OMM / JSON · propagação SGP4 · CesiumJS</footer>
+      {explorationActive && !exploreUiOpen && <button className="explore-appreciation-button" onClick={() => setExploreUiOpen(true)} aria-label="Abrir opções da exploração" title="Abrir opções">☰</button>}
+      {explorationActive && exploreUiOpen && <ExplorationHud snapshot={explorationHud} debugFlight={debugFlight} showTargetMarker={exploreObjectMarkerEnabled} onExit={onExitExplore} onOpenNav={onOpenExploreNav} onOpenSettings={onOpenExploreSettings} controlsHelpVisible={exploreControlsVisible} onDismissHelp={dismissExploreControls} />}
       {explorationActive && exploreNavOpen && <ExploreNav query={exploreNavQuery} entries={exploreNavEntries} onQueryChange={setExploreNavQuery} onSelect={selectExploreTarget} onClose={() => setExploreNavOpen(false)} />}
-      {explorationActive && exploreSettingsOpen && <ExploreSettings steeringSensitivity={exploreSteeringSensitivity} cameraSensitivity={exploreCameraSensitivity} onSteeringChange={setExploreSteeringSensitivity} onCameraChange={setExploreCameraSensitivity} onClose={() => setExploreSettingsOpen(false)} />}
+      {explorationActive && exploreSettingsOpen && <ExploreSettings cameraSensitivity={exploreCameraSensitivity} onCameraChange={setExploreCameraSensitivity} cameraPreset={exploreCameraPreset} onCameraPresetChange={setExploreCameraPreset} orbitsEnabled={orbitsEnabled} onOrbitsChange={setOrbitsEnabled} cloudsEnabled={cloudsEnabled} cloudOpacity={cloudOpacity} cloudShadowsEnabled={cloudShadowsEnabled} onCloudsChange={setCloudsEnabled} onCloudOpacityChange={setCloudOpacity} onCloudShadowsChange={setCloudShadowsEnabled} objectMarkerEnabled={exploreObjectMarkerEnabled} onObjectMarkerChange={setExploreObjectMarkerEnabled} onVisualOnly={() => { setExploreNavOpen(false); setExploreSettingsOpen(false); setExploreUiOpen(false) }} onClose={() => setExploreSettingsOpen(false)} />}
     </main>
   )
 }

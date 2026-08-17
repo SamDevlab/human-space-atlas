@@ -13,6 +13,7 @@ import { applyCameraOrbit, applyCameraZoom, clampCameraPitch, DEFAULT_CAMERA_DIS
 import { AUTOPILOT_STANDOFF_METERS, computeAutopilotGuidance } from '../src/exploration/autopilot'
 import { normalizeEarthEvents } from '../src/lib/earthEvents'
 import { cloudAlphaFromRgb } from '../src/lib/earthLayers'
+import { normalizeAircraftStates } from '../src/lib/airTraffic'
 
 const record = (id: number, type: string, name: string): OmmRecord => ({
   OBJECT_NAME: name, EPOCH: '2026-08-16T00:00:00.000Z', NORAD_CAT_ID: id,
@@ -190,18 +191,39 @@ describe('exploration autopilot guidance', () => {
     expect(guidance.etaSeconds).toBeGreaterThan(0)
   })
 
-  it('slows toward a ten-kilometer approach standoff', () => {
+  it('slows toward a wide trailing approach standoff', () => {
     const state = { ...createShipState(new Cartesian3(0, 0, 0), Quaternion.IDENTITY), velocity: new Cartesian3(4_000, 0, 0) }
-    const guidance = computeAutopilotGuidance(state, new Cartesian3(20_000, 0, 0), Cartesian3.ZERO, 'APPROACH')
+    const guidance = computeAutopilotGuidance(state, new Cartesian3(AUTOPILOT_STANDOFF_METERS, 0, 0), Cartesian3.ZERO, 'APPROACH')
     expect(guidance.input.brake).toBe(true)
-    expect(AUTOPILOT_STANDOFF_METERS).toBe(10_000)
+    expect(AUTOPILOT_STANDOFF_METERS).toBe(110_000)
+  })
+
+  it('pitches toward an elevated intercept point instead of into the planet', () => {
+    const state = createShipState(new Cartesian3(0, 0, 0), Quaternion.IDENTITY)
+    const guidance = computeAutopilotGuidance(state, new Cartesian3(100_000, 0, 100_000), Cartesian3.ZERO, 'INTERCEPT')
+    expect(guidance.input.pitchRate).toBeGreaterThan(0)
   })
 
   it('holds at a standoff point rather than targeting the object center', () => {
-    const state = createShipState(new Cartesian3(12_000, 0, 0), Quaternion.IDENTITY)
+    const state = createShipState(new Cartesian3(AUTOPILOT_STANDOFF_METERS, 0, 0), Quaternion.IDENTITY)
     const guidance = computeAutopilotGuidance(state, Cartesian3.ZERO, Cartesian3.ZERO, 'HOLD')
-    expect(guidance.distanceMeters).toBe(12_000)
+    expect(guidance.distanceMeters).toBe(AUTOPILOT_STANDOFF_METERS)
     expect(guidance.input.throttleDelta).toBeLessThanOrEqual(0)
+  })
+
+  it('uses a trailing formation point and matches the target velocity', () => {
+    const targetPosition = new Cartesian3(7_000_000, 0, 0)
+    const targetVelocity = new Cartesian3(0, 7_500, 0)
+    const state = {
+      ...createShipState(new Cartesian3(7_000_000, -AUTOPILOT_STANDOFF_METERS, 0), Quaternion.IDENTITY),
+      velocity: targetVelocity.clone(),
+    }
+    const guidance = computeAutopilotGuidance(state, targetPosition, targetVelocity, 'HOLD')
+    expect(guidance.desiredPosition.y).toBeCloseTo(-AUTOPILOT_STANDOFF_METERS, 0)
+    // The trailing formation point rotates with the orbit, so its velocity
+    // contains a small radial component in addition to targetVelocity.
+    expect(Math.abs(guidance.desiredVelocity.y - targetVelocity.y)).toBeLessThan(5)
+    expect(Math.abs(guidance.desiredVelocity.x)).toBeLessThan(220)
   })
 })
 
@@ -249,5 +271,17 @@ describe('NASA GIBS cloud palette', () => {
     expect(cloudAlphaFromRgb(20, 80, 150)).toBe(0)
     expect(cloudAlphaFromRgb(185, 145, 80)).toBe(0)
     expect(cloudAlphaFromRgb(0, 0, 0)).toBe(0)
+  })
+})
+
+describe('live air traffic normalization', () => {
+  it('keeps airborne aircraft with reported altitude and discards ground states', () => {
+    const payload = {
+      states: [
+        ['abc123', 'HSA101 ', 'Testland', 0, 100, -47, -15, 8_000, false, 220, 180, 0, null, 8_100, null, false, 0, 3],
+        ['ground', 'GROUND ', 'Testland', 0, 100, -47, -15, 0, true, 0, null, 0, null, 0, null, false, 0, 3],
+      ],
+    }
+    expect(normalizeAircraftStates(payload)).toMatchObject([{ icao24: 'abc123', callsign: 'HSA101', altitudeMeters: 8_100 }])
   })
 })
