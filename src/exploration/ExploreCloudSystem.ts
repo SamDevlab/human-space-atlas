@@ -1,7 +1,7 @@
+import * as Cesium from 'cesium'
 import {
   Cartesian2,
   Cartesian3,
-  CloudCollection,
   Color,
   Viewer,
 } from 'cesium'
@@ -31,6 +31,29 @@ export type ExploreCloudSeed = {
 
 export type CloudAlphaSampler = (longitudeDeg: number, latitudeDeg: number) => number
 
+type CloudCollectionLike = {
+  show: boolean
+  add: (options: {
+    position: Cartesian3
+    scale: Cartesian2
+    maximumSize: Cartesian3
+    slice: number
+    brightness: number
+    color: Color
+  }) => unknown
+  removeAll: () => void
+}
+
+type CloudCollectionConstructor = new (options?: {
+  noiseDetail?: number
+  noiseOffset?: Cartesian3
+}) => CloudCollectionLike
+
+// CloudCollection is part of the public Cesium runtime API. Access it through
+// the namespace here so this module remains compatible with the package's
+// generated declaration layout across Cesium minor releases.
+const CloudCollectionCtor = (Cesium as unknown as { CloudCollection: CloudCollectionConstructor }).CloudCollection
+
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
 }
@@ -52,7 +75,7 @@ export function wrapCloudLongitude(longitudeDeg: number): number {
 export function exploreCloudVolumeFade(cameraHeightMeters: number): number {
   // Full volumetric clouds through low orbit, then gracefully hand off to the
   // global NASA imagery layer before the camera gets far enough away that
-  // thousands of 3D cloud volumes add no useful parallax.
+  // hundreds of 3D cloud volumes add no useful parallax.
   return 1 - smoothstep01((cameraHeightMeters - 550_000) / 900_000)
 }
 
@@ -165,7 +188,7 @@ function angularDistanceDegrees(left: number, right: number): number {
 
 export class ExploreCloudSystem {
   private readonly viewer: Viewer
-  private collection: CloudCollection | null = null
+  private collection: CloudCollectionLike | null = null
   private sampleAlpha: CloudAlphaSampler | null = null
   private running = false
   private destroyed = false
@@ -187,10 +210,10 @@ export class ExploreCloudSystem {
     const generation = ++this.loadGeneration
 
     if (!this.collection) {
-      this.collection = this.viewer.scene.primitives.add(new CloudCollection({
+      this.collection = this.viewer.scene.primitives.add(new CloudCollectionCtor({
         noiseDetail: CLOUD_COLLECTION_NOISE_DETAIL,
         noiseOffset: new Cartesian3(13.7, 4.2, 27.4),
-      }))
+      })) as CloudCollectionLike
       this.collection.show = false
     }
 
@@ -216,6 +239,7 @@ export class ExploreCloudSystem {
   }
 
   stop(): void {
+    this.loadGeneration += 1
     if (this.running && !this.viewer.isDestroyed()) this.viewer.scene.preRender.removeEventListener(this.onPreRender)
     this.running = false
     if (this.collection) {
@@ -231,7 +255,6 @@ export class ExploreCloudSystem {
   destroy(): void {
     if (this.destroyed) return
     this.destroyed = true
-    this.loadGeneration += 1
     this.stop()
     if (this.collection && !this.viewer.isDestroyed()) this.viewer.scene.primitives.remove(this.collection)
     this.collection = null
