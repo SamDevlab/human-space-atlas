@@ -96,6 +96,7 @@ const POINT_SIZE = 5
 const SATELLITE_INTERPOLATION_MS = 720
 const CLOUD_DRIFT_RADIANS_PER_SECOND = 0.0009
 const CLOUD_SHADOW_DRIFT_RADIANS_PER_SECOND = 0.00082
+const CLOUD_HIGH_DRIFT_RADIANS_PER_SECOND = 0.00062
 const ARC_GIS_TERRAIN_URL = 'https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer'
 const AIRCRAFT_PREDICTION_SECONDS = 15
 const AIRCRAFT_ROUTE_RETENTION_MS = 5 * 60 * 1000
@@ -445,17 +446,17 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     const opacity = Math.max(0, Math.min(1, cloudOpacity))
     const fallbackCloudTexture = createNasaCloudTexture()
     const cloudTextureUrl = fallbackCloudTexture.toDataURL('image/png')
-    // The procedural shell is the readable low-orbit volume. Keep it strong
-    // enough to show individual cloud systems, but let the texture's alpha
-    // define the shape so it never becomes a uniform white veil.
-    const cloudShellAlpha = opacity * (explorationActive ? 0.68 : 0.46)
+    // Explore gets a cinematic volume instead of a flat map overlay. The
+    // lower shell carries the cloud banks and the higher shell adds subtle
+    // parallax without turning the planet into a white veil.
+    const cloudShellAlpha = opacity * (explorationActive ? 0.64 : 0.46)
     const cloudMaterial = Material.fromType('Image', {
       image: cloudTextureUrl,
       color: Color.WHITE.withAlpha(cloudShellAlpha),
     })
     const wispyMaterial = Material.fromType('Image', {
       image: cloudTextureUrl,
-      color: Color.fromCssColorString('#d8efff').withAlpha(cloudShellAlpha * 0.2),
+      color: Color.fromCssColorString('#d8efff').withAlpha(cloudShellAlpha * 0.26),
     })
     const shadowMaterial = Material.fromType('Image', {
       image: cloudTextureUrl,
@@ -470,22 +471,25 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
           vertexFormat: MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat,
         }),
       }),
+      // Keep the material flat-shaded so the cloud alpha remains visible on
+      // both the sunlit and night-facing sides; the nested shells provide the
+      // depth cue without turning the volume into a dark opaque fog.
       appearance: new MaterialAppearance({ material, faceForward: true, translucent: true, flat: true }),
       asynchronous: false,
       allowPicking: false,
       cull: false,
       show: true,
     }))
-    // Keep one elevated shell in both modes. It is anchored to the globe and
-    // uses the observed NASA mask, so Explore never falls back to camera-
-    // relative cloud sprites or floating blobs.
-    const cloudShell = createCloudShell(11_500, cloudMaterial)
+    // Keep Earth-anchored shells in both modes. Their small altitude offset
+    // makes the cloud field read as volume when the camera is in low orbit.
+    const cloudShell = createCloudShell(9_500, cloudMaterial)
+    const highCloudShell = explorationActive ? createCloudShell(15_500, wispyMaterial) : null
     // The low shadow shell is useful in the map view, but from the spacecraft
     // it sits directly in front of the terrain and exaggerates any source
     // pixel into square plates. Explore keeps the soft high cloud volume and
     // leaves the terrain readable; the shadow option still applies to the map.
     const shadowShell = cloudShadowsEnabled && !explorationActive ? createCloudShell(1_800, shadowMaterial) : null
-    cloudShellRef.current = [cloudShell, shadowShell].filter((shell): shell is Primitive => Boolean(shell))
+    cloudShellRef.current = [cloudShell, highCloudShell, shadowShell].filter((shell): shell is Primitive => Boolean(shell))
     const cloudMotionStartedAt = performance.now()
     createNasaCloudTextureFromApi().catch(() => fallbackCloudTexture).then((cloudTexture) => {
       if (cancelled || viewer.isDestroyed()) return
@@ -508,16 +512,25 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
         // look like a white dust filter at close range.
         cloudLayer.alpha = opacity * detailFade * 0.82
         cloudLayer.show = !explorationActive && detailFade > 0.01
-        // Fade the optional elevated map shells when the camera gets close
-        // to the surface; Explore has no separate floating cloud geometry.
-        const shellFade = Math.max(0.3, Math.min(1, 0.3 + (height - 70_000) / 250_000))
+        // Like Google Earth, let the atmospheric cloud layer disappear as the
+        // camera enters the terrain view. The fade is smooth and independent
+        // of the map tile loading state, so it never pops in or out.
+        const fadeStart = explorationActive ? 135_000 : 85_000
+        const fadeRange = explorationActive ? 300_000 : 240_000
+        const fadeAmount = Math.max(0, Math.min(1, (height - fadeStart) / fadeRange))
+        const shellFade = fadeAmount * fadeAmount * (3 - 2 * fadeAmount)
         cloudMaterial.uniforms.color = Color.WHITE.withAlpha(cloudShellAlpha * shellFade)
-        wispyMaterial.uniforms.color = Color.fromCssColorString('#d8efff').withAlpha(cloudShellAlpha * 0.2 * shellFade)
+        wispyMaterial.uniforms.color = Color.fromCssColorString('#d8efff').withAlpha(cloudShellAlpha * 0.26 * shellFade)
         shadowMaterial.uniforms.color = Color.fromCssColorString('#0a1825').withAlpha(opacity * (explorationActive ? 0.08 : 0.07) * shellFade)
-        if (cloudShell) cloudShell.show = shellFade > 0.02
+        if (cloudShell) cloudShell.show = shellFade > 0.01
+        if (highCloudShell) highCloudShell.show = shellFade > 0.04
         if (shadowShell) shadowShell.show = cloudShadowsEnabled && shellFade > 0.15
         const cloudRotation = Matrix3.fromRotationZ((performance.now() - cloudMotionStartedAt) / 1000 * CLOUD_DRIFT_RADIANS_PER_SECOND, new Matrix3())
         if (cloudShell) cloudShell.modelMatrix = Matrix4.fromRotationTranslation(cloudRotation, Cartesian3.ZERO, new Matrix4())
+        if (highCloudShell) {
+          const highCloudRotation = Matrix3.fromRotationZ((performance.now() - cloudMotionStartedAt) / 1000 * CLOUD_HIGH_DRIFT_RADIANS_PER_SECOND, new Matrix3())
+          highCloudShell.modelMatrix = Matrix4.fromRotationTranslation(highCloudRotation, Cartesian3.ZERO, new Matrix4())
+        }
         if (shadowShell) {
           const shadowRotation = Matrix3.fromRotationZ((performance.now() - cloudMotionStartedAt) / 1000 * CLOUD_SHADOW_DRIFT_RADIANS_PER_SECOND, new Matrix3())
           shadowShell.modelMatrix = Matrix4.fromRotationTranslation(shadowRotation, Cartesian3.ZERO, new Matrix4())

@@ -48,8 +48,9 @@ function App() {
   const [mapStyleLoading, setMapStyleLoading] = useState(false)
   const [cloudsEnabled, setCloudsEnabled] = useState(() => localStorage.getItem('human-space-atlas.clouds-enabled') !== '0')
   const [cloudOpacity, setCloudOpacity] = useState(() => {
-    const saved = Number(localStorage.getItem('human-space-atlas.cloud-opacity-v2'))
-    return Number.isFinite(saved) ? Math.min(0.7, Math.max(0, saved)) : 0.42
+    const savedValue = localStorage.getItem('human-space-atlas.cloud-opacity-v3')
+    const saved = savedValue === null ? null : Number(savedValue)
+    return saved !== null && Number.isFinite(saved) ? Math.min(0.7, Math.max(0, saved)) : 0.5
   })
   const [cloudShadowsEnabled, setCloudShadowsEnabled] = useState(() => localStorage.getItem('human-space-atlas.cloud-shadows-enabled') !== '0')
   const [atmosphereEnabled, setAtmosphereEnabled] = useState(() => localStorage.getItem('human-space-atlas.atmosphere-enabled') !== '0')
@@ -131,7 +132,7 @@ function App() {
   useEffect(() => { localStorage.setItem('human-space-atlas.render-limit', String(customLimit)) }, [customLimit])
   useEffect(() => { localStorage.setItem('human-space-atlas.map-style-v2', mapStyle) }, [mapStyle])
   useEffect(() => { localStorage.setItem('human-space-atlas.clouds-enabled', cloudsEnabled ? '1' : '0') }, [cloudsEnabled])
-  useEffect(() => { localStorage.setItem('human-space-atlas.cloud-opacity-v2', String(cloudOpacity)) }, [cloudOpacity])
+  useEffect(() => { localStorage.setItem('human-space-atlas.cloud-opacity-v3', String(cloudOpacity)) }, [cloudOpacity])
   useEffect(() => { localStorage.setItem('human-space-atlas.cloud-shadows-enabled', cloudShadowsEnabled ? '1' : '0') }, [cloudShadowsEnabled])
   useEffect(() => { localStorage.setItem('human-space-atlas.atmosphere-enabled', atmosphereEnabled ? '1' : '0') }, [atmosphereEnabled])
   useEffect(() => { localStorage.setItem('human-space-atlas.terrain-enabled', terrainEnabled ? '1' : '0') }, [terrainEnabled])

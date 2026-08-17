@@ -4,8 +4,8 @@ type SkyFace = 'positiveX' | 'negativeX' | 'positiveY' | 'negativeY' | 'positive
 
 type Direction = { x: number; y: number; z: number }
 
-const SKY_FACE_SIZE = 1536
-const STAR_COUNT = 4_200
+const SKY_FACE_SIZE = 2048
+const STAR_COUNT = 2_800
 const SKY_FACES: SkyFace[] = ['positiveX', 'negativeX', 'positiveY', 'negativeY', 'positiveZ', 'negativeZ']
 
 function random(seed: number): () => number {
@@ -84,13 +84,13 @@ function renderSkyFace(face: SkyFace, faceIndex: number, stars: Direction[]): st
     if (x < -4 || x > SKY_FACE_SIZE + 4 || y < -4 || y > SKY_FACE_SIZE + 4) continue
 
     const brightness = Math.max(0.35, Math.min(1, 0.35 + Math.abs(direction.x * 0.7 + direction.y * 0.2 + direction.z * 0.4)))
-    const largeStar = brightness > 0.78
-    const radius = largeStar ? 1.1 + brightness * 1.25 : 0.35 + brightness * 0.55
+    const largeStar = brightness > 0.9
+    const radius = largeStar ? 0.75 + brightness * 0.85 : 0.2 + brightness * 0.42
     const color = largeStar ? '198, 226, 255' : '224, 235, 255'
     context.fillStyle = `rgba(${color}, ${0.45 + brightness * 0.5})`
     if (largeStar) {
       context.shadowColor = `rgba(138, 205, 255, ${0.35 + brightness * 0.25})`
-      context.shadowBlur = radius * 3.5
+      context.shadowBlur = radius * 2.2
     }
     context.beginPath()
     context.arc(x, y, radius, 0, Math.PI * 2)

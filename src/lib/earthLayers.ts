@@ -97,7 +97,7 @@ function proceduralCloudAlpha(x: number, y: number): number {
   const wispyDetail = smoothstep(Math.max(0, Math.min(1, (detail + fine * 0.5 - 0.38) / 0.34)))
   const latitude = y / CLOUD_TEXTURE_HEIGHT
   const bandWeight = 0.82 + 0.18 * Math.sin(latitude * Math.PI)
-  return Math.round(cloudShape * (72 + wispyDetail * 168) * bandWeight)
+  return Math.round(cloudShape * (42 + wispyDetail * 138) * bandWeight)
 }
 
 function renderCloudImage(width: number, height: number): HTMLCanvasElement {
@@ -236,7 +236,7 @@ export async function createNasaCloudTextureFromApi(observationDate = cloudObser
     // systems disappear whenever the composite was dim or partially sampled.
     const detail = smoothstep(Math.min(1, Math.max(0, (trueColorDetail - 0.12) / 0.52)))
     const noData = red + green + blue < 42
-    const alpha = noData ? 0 : Math.min(255, Math.round(realAlpha * (0.72 + detail * 0.38)))
+    const alpha = noData ? 0 : Math.min(255, Math.round(realAlpha * (0.58 + detail * 0.42)))
     // Render the observed formations as soft white cloud volume. The NASA
     // coverage mask supplies their location; the true-colour signal only
     // controls edge density so oceans do not become a blue veil.
