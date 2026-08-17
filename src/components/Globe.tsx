@@ -3,7 +3,6 @@ import {
   Cartesian3,
   Cartesian2,
   ArcGISTiledElevationTerrainProvider,
-  BillboardCollection,
   Color,
   ColorMaterialProperty,
   ConstantProperty,
@@ -36,8 +35,7 @@ import {
   VelocityOrientationProperty,
 } from 'cesium'
 import { discoverMapStyles } from '../lib/mapStyles'
-import { createCloudBillboardTexture, createExploreCloudCards, createNasaCloudProvider, createNasaCloudTexture, preloadNasaCloudTexture, createNasaNightLightsProvider, NASA_GIBS_CLOUD_OBSERVATION_DATE } from '../lib/earthLayers'
-import type { ExploreCloudCard } from '../lib/earthLayers'
+import { createNasaCloudProvider, createNasaCloudTexture, preloadNasaCloudTexture, createNasaNightLightsProvider, NASA_GIBS_CLOUD_OBSERVATION_DATE } from '../lib/earthLayers'
 import { eventColor } from '../lib/earthEvents'
 import type { EarthEvent } from '../lib/earthEvents'
 import type { OmmRecord } from '../lib/types'
@@ -138,7 +136,6 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
   const cloudLayerRef = useRef<ImageryLayer | null>(null)
   const nightLightsLayerRef = useRef<ImageryLayer | null>(null)
   const cloudShellRef = useRef<Primitive[]>([])
-  const cloudBillboardsRef = useRef<BillboardCollection | null>(null)
   const orbitEntityRef = useRef<Entity | null>(null)
   const satelliteTrailEntityRef = useRef<Entity | null>(null)
   const orbitPositionsRef = useRef<ConstantProperty | null>(null)
@@ -319,8 +316,6 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       terrainProviderRef.current = null
       cloudShellRef.current.forEach((shell) => viewer.scene.primitives.remove(shell))
       cloudShellRef.current = []
-      if (cloudBillboardsRef.current) viewer.scene.primitives.remove(cloudBillboardsRef.current)
-      cloudBillboardsRef.current = null
       if (nightLightsLayerRef.current && !viewer.isDestroyed()) viewer.imageryLayers.remove(nightLightsLayerRef.current, false)
       nightLightsLayerRef.current = null
       orbitEntityRef.current = null
@@ -453,9 +448,9 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     // Explore gets a cinematic volume instead of a flat map overlay. The
     // map uses the continuous shell; Explore uses Earth-anchored cloud banks
     // with separate low and high strata so the terrain remains readable.
-    // Both modes use the same observed NASA macro layer. Explore adds the
-    // 2.5D banks on top, while the altitude fade keeps it from becoming fog
-    // when the camera gets close to the terrain.
+    // Both modes use the same observed NASA macro layer. Explore keeps the
+    // same visual language as the normal globe and uses only the altitude
+    // fade to prevent it from becoming fog when the camera gets close.
     const cloudShellAlpha = opacity * 0.46
     const cloudMaterial = Material.fromType('Image', {
       image: cloudTextureUrl,
@@ -483,8 +478,6 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       cull: false,
       show: true,
     }))
-    // Both modes keep the observed macro mask, but Explore renders it at a
-    // much lower alpha and adds Earth-anchored 2.5D banks for the close view.
     const cloudShell = createCloudShell(9_500, cloudMaterial)
     // The low shadow shell is useful in the map view, but from the spacecraft
     // it sits directly in front of the terrain and exaggerates any source
@@ -492,35 +485,6 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     // leaves the terrain readable; the shadow option still applies to the map.
     const shadowShell = cloudShadowsEnabled && !explorationActive ? createCloudShell(1_800, shadowMaterial) : null
     cloudShellRef.current = [cloudShell, shadowShell].filter((shell): shell is Primitive => Boolean(shell))
-    // Use stable data URLs so Cesium can share the four sprite textures in a
-    // single atlas. Passing a fresh canvas object to every billboard creates
-    // one atlas entry per cloud bank and eventually exceeds GPU limits.
-    const cloudSprites = [0, 1, 2, 3].map((seed) => createCloudBillboardTexture(seed).toDataURL('image/png'))
-    const cloudBillboards = explorationActive ? viewer.scene.primitives.add(new BillboardCollection()) : null
-    const cloudBillboardEntries: Array<{ billboard: ReturnType<BillboardCollection['add']>; card: ExploreCloudCard }> = []
-    let previousBillboardFade = -1
-    cloudBillboardsRef.current = cloudBillboards
-    const rebuildExploreClouds = (texture: HTMLCanvasElement) => {
-      if (!cloudBillboards || viewer.isDestroyed()) return
-      cloudBillboards.removeAll()
-      cloudBillboardEntries.length = 0
-      const cards = createExploreCloudCards(texture)
-      cards.forEach((card) => {
-        const billboard = cloudBillboards.add({
-          position: Cartesian3.fromDegrees(card.longitudeDeg, card.latitudeDeg, card.altitudeMeters),
-          image: cloudSprites[card.imageIndex],
-          width: card.widthMeters,
-          height: card.heightMeters,
-          sizeInMeters: true,
-          rotation: card.rotation,
-          color: (card.highLayer ? Color.fromCssColorString('#d8efff') : Color.WHITE).withAlpha(Math.min(0.82, opacity * 1.35 * card.alpha)),
-          scaleByDistance: new NearFarScalar(70_000, 0.88, 1_500_000, 0.68),
-          translucencyByDistance: new NearFarScalar(70_000, 0.98, 1_500_000, 0.84),
-        })
-        cloudBillboardEntries.push({ billboard, card })
-      })
-    }
-    if (cloudBillboards) rebuildExploreClouds(fallbackCloudTexture)
     const cloudMotionStartedAt = performance.now()
     // The promise is shared by all globe remounts and backed by CacheStorage,
     // so changing map mode does not restart the two large NASA downloads.
@@ -529,7 +493,6 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       const cloudTextureUrl = cloudTexture.toDataURL('image/png')
       cloudMaterial.uniforms.image = cloudTextureUrl
       shadowMaterial.uniforms.image = cloudTextureUrl
-      rebuildExploreClouds(cloudTexture)
       return createNasaCloudProvider(NASA_GIBS_CLOUD_OBSERVATION_DATE, cloudTexture)
     }).then((provider) => {
       if (cancelled || viewer.isDestroyed() || !provider) return
@@ -538,8 +501,8 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
         if (viewer.isDestroyed()) return
         const height = viewer.camera.positionCartographic.height
         const detailFade = Math.max(0, Math.min(1, (height - 900_000) / 1_900_000))
-        // The mapped layer is only for the global map context. Explore uses
-        // the card volume above, so the terrain never receives a white filter.
+        // Keep the imagery layer for the normal globe only; Explore uses the
+        // same NASA texture on the elevated shell to avoid a flat decal.
         cloudLayer.alpha = opacity * detailFade * 0.82
         cloudLayer.show = !explorationActive && detailFade > 0.01
         // Like Google Earth, let the atmospheric cloud layer disappear as the
@@ -555,16 +518,6 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
         if (shadowShell) shadowShell.show = cloudShadowsEnabled && shellFade > 0.15
         const cloudRotation = Matrix3.fromRotationZ((performance.now() - cloudMotionStartedAt) / 1000 * CLOUD_DRIFT_RADIANS_PER_SECOND, new Matrix3())
         if (cloudShell) cloudShell.modelMatrix = Matrix4.fromRotationTranslation(cloudRotation, Cartesian3.ZERO, new Matrix4())
-        if (cloudBillboards) {
-          cloudBillboards.show = shellFade > 0.015
-          cloudBillboards.modelMatrix = Matrix4.fromRotationTranslation(cloudRotation, Cartesian3.ZERO, new Matrix4())
-          if (Math.abs(shellFade - previousBillboardFade) > 0.004) {
-            cloudBillboardEntries.forEach(({ billboard, card }) => {
-              billboard.color = (card.highLayer ? Color.fromCssColorString('#d8efff') : Color.WHITE).withAlpha(Math.min(0.82, opacity * 1.35 * card.alpha * shellFade))
-            })
-            previousBillboardFade = shellFade
-          }
-        }
         if (shadowShell) {
           const shadowRotation = Matrix3.fromRotationZ((performance.now() - cloudMotionStartedAt) / 1000 * CLOUD_SHADOW_DRIFT_RADIANS_PER_SECOND, new Matrix3())
           shadowShell.modelMatrix = Matrix4.fromRotationTranslation(shadowRotation, Cartesian3.ZERO, new Matrix4())
@@ -583,8 +536,6 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       removeCloudLayer()
       cloudShellRef.current.forEach((shell) => { if (!viewer.isDestroyed()) viewer.scene.primitives.remove(shell) })
       cloudShellRef.current = []
-      if (cloudBillboardsRef.current && !viewer.isDestroyed()) viewer.scene.primitives.remove(cloudBillboardsRef.current)
-      cloudBillboardsRef.current = null
     }
   }, [cloudsEnabled, explorationActive, cloudOpacity, cloudShadowsEnabled, onCloudError])
 
