@@ -21,7 +21,7 @@ const CLOUD_MAX_COUNT = 240
 const CLOUD_ALPHA_REFERENCE = 0.48
 const CLOUD_VOLUME_FULL_BELOW_METERS = 180_000
 const CLOUD_VOLUME_OFF_ABOVE_METERS = 300_000
-const CLOUD_FAR_FIELD_MAX_ALPHA = 0.78
+const CLOUD_FAR_FIELD_MAX_ALPHA = 1
 
 export const EXPLORE_CLOUD_DISCLOSURE = 'NASA observed cloud field · cinematic 3D reconstruction'
 
@@ -200,8 +200,8 @@ export function createExploreCloudSeeds(
           scaleY,
           depthMeters,
           slice: 0.42 + hash01(cellX * 61 + clusterIndex * 67 + 37, cellY * 71 + 41) * 0.18,
-          brightness: 0.7 + coverage * 0.18 + heightNoise * 0.06,
-          alpha: clamp(0.28 + coverage * 0.46, 0.28, 0.76),
+          brightness: 0.78 + coverage * 0.2 + heightNoise * 0.06,
+          alpha: clamp(0.42 + coverage * 0.52, 0.42, 0.96),
         })
       }
     }
@@ -222,7 +222,7 @@ export class ExploreCloudSystem {
   private running = false
   private destroyed = false
   private loadGeneration = 0
-  private opacity = 0.55
+  private opacity = 0.72
   private lastLongitudeDeg: number | null = null
   private lastLatitudeDeg: number | null = null
   private lastAltitudeBucket = -1
@@ -233,7 +233,7 @@ export class ExploreCloudSystem {
     this.viewer = viewer
   }
 
-  async start(opacity = 0.55): Promise<void> {
+  async start(opacity = 0.72): Promise<void> {
     this.opacity = clamp(opacity, 0, 1)
     if (this.destroyed || this.viewer.isDestroyed()) return
     const generation = ++this.loadGeneration
@@ -256,9 +256,9 @@ export class ExploreCloudSystem {
         if (this.destroyed || generation !== this.loadGeneration || this.viewer.isDestroyed()) return
         const layer = this.viewer.imageryLayers.addImageryProvider(provider)
         layer.alpha = 0
-        layer.brightness = 1.04
-        layer.contrast = 1.08
-        layer.saturation = 0.9
+        layer.brightness = 1.12
+        layer.contrast = 1.18
+        layer.saturation = 0.88
         layer.show = false
         this.viewer.imageryLayers.raiseToTop(layer)
         this.farFieldLayer = layer
@@ -317,7 +317,7 @@ export class ExploreCloudSystem {
     const mapFade = exploreCloudMapFade(altitudeMeters)
 
     if (this.farFieldLayer) {
-      this.farFieldLayer.alpha = clamp(this.opacity * mapFade * CLOUD_FAR_FIELD_MAX_ALPHA, 0, CLOUD_FAR_FIELD_MAX_ALPHA)
+      this.farFieldLayer.alpha = clamp(this.opacity * 1.12 * mapFade * CLOUD_FAR_FIELD_MAX_ALPHA, 0, CLOUD_FAR_FIELD_MAX_ALPHA)
       this.farFieldLayer.show = mapFade > 0.01 && this.farFieldLayer.alpha > 0.005
     }
 
@@ -343,7 +343,7 @@ export class ExploreCloudSystem {
     const mapFade = exploreCloudMapFade(altitudeMeters)
 
     if (this.farFieldLayer) {
-      this.farFieldLayer.alpha = clamp(this.opacity * mapFade * CLOUD_FAR_FIELD_MAX_ALPHA, 0, CLOUD_FAR_FIELD_MAX_ALPHA)
+      this.farFieldLayer.alpha = clamp(this.opacity * 1.12 * mapFade * CLOUD_FAR_FIELD_MAX_ALPHA, 0, CLOUD_FAR_FIELD_MAX_ALPHA)
       this.farFieldLayer.show = mapFade > 0.01 && this.farFieldLayer.alpha > 0.005
     }
 
@@ -362,7 +362,7 @@ export class ExploreCloudSystem {
     const seeds = createExploreCloudSeeds(longitudeDeg, latitudeDeg, radiusDegrees, this.sampleAlpha)
     this.collection.removeAll()
 
-    const renderedAlpha = clamp(this.opacity * volumeFade, 0, 1)
+    const renderedAlpha = clamp(this.opacity * 1.18 * volumeFade, 0, 1)
     for (const seed of seeds) {
       this.collection.add({
         position: Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.altitudeMeters),
@@ -370,7 +370,7 @@ export class ExploreCloudSystem {
         maximumSize: new Cartesian3(seed.scaleX, seed.scaleY, seed.depthMeters),
         slice: seed.slice,
         brightness: seed.brightness,
-        color: Color.fromCssColorString('#f3f7fb').withAlpha(clamp(seed.alpha * renderedAlpha, 0, 0.72)),
+        color: Color.fromCssColorString('#f7fbff').withAlpha(clamp(seed.alpha * renderedAlpha, 0, 0.96)),
       })
     }
 
