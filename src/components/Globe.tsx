@@ -453,7 +453,10 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
     // Explore gets a cinematic volume instead of a flat map overlay. The
     // map uses the continuous shell; Explore uses Earth-anchored cloud banks
     // with separate low and high strata so the terrain remains readable.
-    const cloudShellAlpha = opacity * (explorationActive ? 0.64 : 0.46)
+    // Explore keeps a very low-alpha observed macro layer behind the 2.5D
+    // banks. It connects nearby systems at orbital distance without becoming
+    // the opaque white fog that used to sit over the terrain.
+    const cloudShellAlpha = opacity * (explorationActive ? 0.24 : 0.46)
     const cloudMaterial = Material.fromType('Image', {
       image: cloudTextureUrl,
       color: Color.WHITE.withAlpha(cloudShellAlpha),
@@ -480,17 +483,19 @@ export function Globe({ objects, simulatedAt, selectedId, onSelect, onPerformanc
       cull: false,
       show: true,
     }))
-    // The map view keeps a continuous shell for global context. Explore uses
-    // Earth-anchored 2.5D cloud banks instead of a full translucent shell;
-    // that distinction is what prevents the low-orbit fog effect.
-    const cloudShell = explorationActive ? null : createCloudShell(9_500, cloudMaterial)
+    // Both modes keep the observed macro mask, but Explore renders it at a
+    // much lower alpha and adds Earth-anchored 2.5D banks for the close view.
+    const cloudShell = createCloudShell(9_500, cloudMaterial)
     // The low shadow shell is useful in the map view, but from the spacecraft
     // it sits directly in front of the terrain and exaggerates any source
     // pixel into square plates. Explore keeps the soft high cloud volume and
     // leaves the terrain readable; the shadow option still applies to the map.
     const shadowShell = cloudShadowsEnabled && !explorationActive ? createCloudShell(1_800, shadowMaterial) : null
     cloudShellRef.current = [cloudShell, shadowShell].filter((shell): shell is Primitive => Boolean(shell))
-    const cloudSprites = [0, 1, 2, 3].map((seed) => createCloudBillboardTexture(seed))
+    // Use stable data URLs so Cesium can share the four sprite textures in a
+    // single atlas. Passing a fresh canvas object to every billboard creates
+    // one atlas entry per cloud bank and eventually exceeds GPU limits.
+    const cloudSprites = [0, 1, 2, 3].map((seed) => createCloudBillboardTexture(seed).toDataURL('image/png'))
     const cloudBillboards = explorationActive ? viewer.scene.primitives.add(new BillboardCollection()) : null
     const cloudBillboardEntries: Array<{ billboard: ReturnType<BillboardCollection['add']>; card: ExploreCloudCard }> = []
     let previousBillboardFade = -1

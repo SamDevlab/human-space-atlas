@@ -178,8 +178,11 @@ export function createExploreCloudCards(texture: HTMLCanvasElement): ExploreClou
   const context = texture.getContext('2d', { willReadFrequently: true })
   if (!context) return []
   const pixels = context.getImageData(0, 0, texture.width, texture.height).data
-  const columns = 40
-  const rows = 20
+  // The mask is sampled more finely in Explore than in the map shell. This
+  // preserves real cloud systems at the scale of the camera instead of
+  // reducing an entire weather front to one isolated sprite.
+  const columns = 64
+  const rows = 32
   const candidates: Array<{ longitudeDeg: number; latitudeDeg: number; coverage: number; seed: number; highLayer: boolean }> = []
   const alphaAt = (x: number, y: number) => {
     const wrappedX = ((x % texture.width) + texture.width) % texture.width
@@ -193,11 +196,11 @@ export function createExploreCloudCards(texture: HTMLCanvasElement): ExploreClou
       const centerY = Math.round((row + 0.5) / rows * texture.height)
       let coverage = 0
       for (let y = -2; y <= 2; y += 1) {
-        for (let x = -3; x <= 3; x += 1) coverage = Math.max(coverage, alphaAt(centerX + x * 7, centerY + y * 7))
+        for (let x = -3; x <= 3; x += 1) coverage = Math.max(coverage, alphaAt(centerX + x * 5, centerY + y * 5))
       }
-      if (coverage < 0.055) continue
+      if (coverage < 0.025) continue
       const seed = seededNoise(column * 17 + 7, row * 31 + 13)
-      if (seed > 0.22 + coverage * 0.64) continue
+      if (seed > 0.12 + coverage * 0.68) continue
       candidates.push({
         longitudeDeg: -180 + (column + 0.5) / columns * 360,
         latitudeDeg: 90 - (row + 0.5) / rows * 180,
@@ -209,18 +212,18 @@ export function createExploreCloudCards(texture: HTMLCanvasElement): ExploreClou
   }
 
   candidates.sort((left, right) => right.coverage - left.coverage)
-  return candidates.slice(0, 180).flatMap((candidate) => {
+  return candidates.slice(0, 360).flatMap((candidate) => {
     const cards: ExploreCloudCard[] = []
-    const clusterSize = candidate.highLayer ? 4 : candidate.coverage > 0.55 ? 7 : 5
+    const clusterSize = candidate.highLayer ? 4 : candidate.coverage > 0.55 ? 7 : candidate.coverage > 0.2 ? 6 : 4
     const elongated = seededNoise(candidate.seed * 97 + 4, candidate.seed * 53 + 9) > 0.68
     for (let index = 0; index < clusterSize; index += 1) {
-      const angle = seededNoise(candidate.seed * 101 + index * 7, candidate.seed * 47 + index * 11) * Math.PI * 2
+      const angle = index === 0 ? 0 : seededNoise(candidate.seed * 101 + index * 7, candidate.seed * 47 + index * 11) * Math.PI * 2
       const spread = candidate.highLayer ? 0.78 : 1.15
-      const distance = (0.18 + seededNoise(candidate.seed * 61 + index * 13, candidate.seed * 29 + index * 17) * 0.82) * spread
+      const distance = index === 0 ? 0 : (0.18 + seededNoise(candidate.seed * 61 + index * 13, candidate.seed * 29 + index * 17) * 0.82) * spread
       const latitudeOffset = Math.sin(angle) * distance
       const longitudeScale = Math.max(0.2, Math.cos(candidate.latitudeDeg * Math.PI / 180))
       const longitudeOffset = Math.cos(angle) * distance / longitudeScale
-      const widthMeters = (candidate.highLayer ? 145_000 : 105_000) + candidate.coverage * (candidate.highLayer ? 125_000 : 155_000)
+      const widthMeters = (candidate.highLayer ? 190_000 : 165_000) + candidate.coverage * (candidate.highLayer ? 150_000 : 185_000)
       const widthVariation = 0.68 + seededNoise(candidate.seed * 71 + index * 5, candidate.seed * 37 + index * 3) * 0.64
       const heightRatio = elongated ? 0.24 + seededNoise(index + 13, Math.round(candidate.seed * 1000) + 17) * 0.14 : 0.42 + seededNoise(index + 19, Math.round(candidate.seed * 1000) + 23) * 0.24
       const altitudeMeters = candidate.highLayer ? 10_500 + index * 1_900 : 3_500 + (index % 3) * 3_600
@@ -230,7 +233,7 @@ export function createExploreCloudCards(texture: HTMLCanvasElement): ExploreClou
         altitudeMeters,
         widthMeters: widthMeters * widthVariation,
         heightMeters: widthMeters * widthVariation * heightRatio,
-        alpha: Math.min(0.94, 0.52 + candidate.coverage * (candidate.highLayer ? 0.38 : 0.48)),
+        alpha: Math.min(0.94, 0.22 + candidate.coverage * (candidate.highLayer ? 0.92 : 1.08)),
         rotation: angle + (elongated ? 0 : (seededNoise(index + 29, Math.round(candidate.seed * 1000) + 31) - 0.5) * 0.7),
         imageIndex: Math.floor(seededNoise(candidate.seed * 83 + index * 7, candidate.seed * 43 + index * 11) * 4),
         highLayer: candidate.highLayer,
