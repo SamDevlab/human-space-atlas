@@ -83,4 +83,32 @@ describe('local API proxy', () => {
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toMatchObject({ source: 'opensky', states: [{ icao24: 'abc2' }, { icao24: 'abc1' }] })
   })
+
+  it('proxies and thins NOAA OVATION aurora data', async () => {
+    const coordinates = [
+      [0, 70, 12],
+      [2, 68, 30],
+      [4, -70, 18],
+      [1, 72, 99],
+      [6, 20, 80],
+      [8, 74, 0],
+    ]
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      'Observation Time': '2026-08-17T20:00:00Z',
+      'Forecast Time': '2026-08-17T20:30:00Z',
+      'Data Format': '[Longitude, Latitude, Aurora]',
+      coordinates,
+    }), { status: 200 }))
+
+    const first = await request('/api/space-weather/aurora')
+    const second = await request('/api/space-weather/aurora')
+    expect(first.status).toBe(200)
+    await expect(first.json()).resolves.toMatchObject({
+      source: 'noaa-swpc-ovation',
+      forecastTime: '2026-08-17T20:30:00Z',
+      peak: 30,
+      points: [[0, 70, 12], [2, 68, 30], [4, -70, 18]],
+    })
+    expect((await second.json()).cache).toBe('hit')
+  })
 })
