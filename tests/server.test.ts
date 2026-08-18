@@ -38,13 +38,34 @@ describe('local API proxy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('refreshes the cache after its TTL expires', async () => {
+  it('serves stale data immediately and starts refresh after TTL', async () => {
     const now = vi.spyOn(Date, 'now').mockReturnValue(0)
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(catalog), { status: 200 }))
     await request('/api/catalog?group=stations')
     now.mockReturnValue(2 * 60 * 60 * 1000 + 1)
-    await request('/api/catalog?group=stations')
+    const stale = await request('/api/catalog?group=stations')
+    expect((await stale.json()).cache).toBe('stale')
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the last valid observation when a stale background refresh fails', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(0)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify(catalog), { status: 200 }))
+    await request('/api/catalog?group=stations')
+    now.mockReturnValue(2 * 60 * 60 * 1000 + 1)
+    fetchMock.mockRejectedValueOnce(new Error('temporary outage'))
+    const response = await request('/api/catalog?group=stations')
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({ cache: 'stale', objects: catalog })
+  })
+
+  it('exposes cache capabilities from the health endpoint', async () => {
+    const response = await request('/api/health')
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      cache: { memory: true, remote: false },
+    })
   })
 
   it('proxies successful JPL Horizons JSON', async () => {
@@ -54,7 +75,7 @@ describe('local API proxy', () => {
     expect((await response.json()).source).toBe('jpl-horizons')
   })
 
-  it('returns structured upstream errors without crashing', async () => {
+  it('returns structured upstream errors without crashing when no cache exists', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network offline'))
     const response = await request('/api/catalog?group=stations')
     expect(response.status).toBe(502)
