@@ -4,6 +4,7 @@ import {
   Cartographic,
   Ellipsoid,
   ImageryLayer,
+  Tonemapper,
   Viewer,
 } from 'cesium'
 import { computeOrbitalLighting } from './OrbitalLighting'
@@ -41,6 +42,36 @@ type PrefetchProvider = {
     getNumberOfXTilesAtLevel: (level: number) => number
     getNumberOfYTilesAtLevel: (level: number) => number
   }
+}
+
+type BloomUniforms = {
+  contrast?: number
+  brightness?: number
+  glowOnly?: boolean
+  delta?: number
+  sigma?: number
+  stepSize?: number
+}
+
+type GraphicsSnapshot = {
+  highDynamicRange: boolean
+  exposure: number
+  tonemapper: string
+  bloomEnabled: boolean
+  bloom: BloomUniforms
+  fog: {
+    enabled: boolean
+    renderable: boolean
+    density: number
+    visualDensityScalar: number
+    minimumBrightness: number
+    maxHeight: number
+    heightFalloff: number
+    screenSpaceErrorFactor: number
+  }
+  waterEffect: boolean
+  globeHue: number
+  skyHue: number | null
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -92,15 +123,17 @@ function isNasaNightLightsLayer(layer: TunableLayer): boolean {
 }
 
 /**
- * Explore-only presentation controller for NASA VIIRS plus a tiny forward
- * imagery prefetcher. The prefetcher asks the active base provider for a 3x3
- * neighborhood near the camera's forward ground intersection. Browser/provider
- * caches then satisfy Cesium when that region enters the visible frustum.
+ * Explore-only presentation controller for NASA VIIRS, forward imagery
+ * prefetch and the restrained Graphics V2 grade. The visual grade intentionally
+ * stays subtle: HDR/exposure, limb atmosphere, horizon haze, ocean water effect
+ * and bloom all respond to the same sunlight value instead of acting as
+ * independent game-like effects.
  */
 export class NightSideSystem {
   private readonly viewer: Viewer
   private layer: TunableLayer | null = null
   private snapshot: NightLayerSnapshot | null = null
+  private graphicsSnapshot: GraphicsSnapshot | null = null
   private running = false
   private lastSearchAt = -Infinity
   private lastPrefetchAt = -Infinity
@@ -118,6 +151,7 @@ export class NightSideSystem {
     this.running = true
     this.stableFrames = 0
     this.lastPrefetchAt = -Infinity
+    this.captureAndEnableGraphics()
     this.resolveLayer(performance.now(), true)
   }
 
@@ -125,7 +159,6 @@ export class NightSideSystem {
     if (!this.running || this.viewer.isDestroyed()) return
     this.resolveLayer(now, false)
     this.prefetchAhead(now)
-    if (!this.layer) return
 
     const canvas = this.viewer.scene.canvas
     this.screenCenter.x = (canvas.clientWidth || canvas.width) * 0.5
@@ -133,10 +166,12 @@ export class NightSideSystem {
     const lookPoint = this.viewer.camera.pickEllipsoid(this.screenCenter, Ellipsoid.WGS84) ?? shipPosition
     const sunlight = computeOrbitalLighting(this.viewer.clock.currentTime, lookPoint).sunlight
     const visual = nightLightsVisual(sunlight)
+    this.updateGraphicsGrade(sunlight)
 
     if (this.viewer.scene.globe.tilesLoaded) this.stableFrames = Math.min(8, this.stableFrames + 1)
     else this.stableFrames = Math.max(0, this.stableFrames - 2)
 
+    if (!this.layer) return
     const readiness = smoothstep01(this.stableFrames / 5)
     const alpha = visual.alpha * readiness
 
@@ -155,12 +190,140 @@ export class NightSideSystem {
     this.running = false
     this.stableFrames = 0
     this.restore()
+    this.restoreGraphics()
   }
 
   destroy(): void {
     this.stop()
     this.layer = null
     this.snapshot = null
+    this.graphicsSnapshot = null
+  }
+
+  private captureAndEnableGraphics(): void {
+    const scene = this.viewer.scene
+    const post = scene.postProcessStages
+    const bloom = post.bloom
+    const bloomUniforms = bloom.uniforms as BloomUniforms
+    const fog = scene.fog
+    const globe = scene.globe
+    const sky = scene.skyAtmosphere
+
+    this.graphicsSnapshot = {
+      highDynamicRange: scene.highDynamicRange,
+      exposure: post.exposure,
+      tonemapper: post.tonemapper,
+      bloomEnabled: bloom.enabled,
+      bloom: {
+        contrast: bloomUniforms.contrast,
+        brightness: bloomUniforms.brightness,
+        glowOnly: bloomUniforms.glowOnly,
+        delta: bloomUniforms.delta,
+        sigma: bloomUniforms.sigma,
+        stepSize: bloomUniforms.stepSize,
+      },
+      fog: {
+        enabled: fog.enabled,
+        renderable: fog.renderable,
+        density: fog.density,
+        visualDensityScalar: fog.visualDensityScalar,
+        minimumBrightness: fog.minimumBrightness,
+        maxHeight: fog.maxHeight,
+        heightFalloff: fog.heightFalloff,
+        screenSpaceErrorFactor: fog.screenSpaceErrorFactor,
+      },
+      waterEffect: globe.showWaterEffect,
+      globeHue: globe.atmosphereHueShift,
+      skyHue: sky ? sky.hueShift : null,
+    }
+
+    if (scene.highDynamicRangeSupported) scene.highDynamicRange = true
+    post.tonemapper = Tonemapper.PBR_NEUTRAL
+    bloom.enabled = true
+    bloomUniforms.glowOnly = false
+    bloomUniforms.delta = 1
+    bloomUniforms.sigma = 2.2
+    bloomUniforms.stepSize = 1
+    post.fxaa.enabled = true
+    globe.showWaterEffect = true
+    fog.enabled = true
+    fog.renderable = true
+    fog.maxHeight = 650_000
+    fog.heightFalloff = 0.52
+    fog.screenSpaceErrorFactor = 1.2
+  }
+
+  private updateGraphicsGrade(sunlight: number): void {
+    const scene = this.viewer.scene
+    const post = scene.postProcessStages
+    const bloomUniforms = post.bloom.uniforms as BloomUniforms
+    const globe = scene.globe
+    const sky = scene.skyAtmosphere
+    const fog = scene.fog
+    const clampedSun = clamp(sunlight, 0, 1)
+    const darkness = 1 - clampedSun
+    const twilight = Math.exp(-Math.pow((clampedSun - 0.5) / 0.19, 2))
+    const height = Math.max(0, scene.camera.positionCartographic.height)
+    const lowOrbit = 1 - smoothstep01((height - 140_000) / 440_000)
+
+    // Automatic exposure protects the bright limb at sunrise/sunset and then
+    // opens slowly in eclipse so cities/aurora can breathe without flattening
+    // daylight imagery.
+    post.exposure = clamp(0.94 - twilight * 0.09 + darkness * 0.14, 0.82, 1.08)
+    bloomUniforms.contrast = 148 + twilight * 18 + darkness * 6
+    bloomUniforms.brightness = -0.31 + darkness * 0.045 + twilight * 0.025
+
+    // A low-density, altitude-bounded horizon haze provides perspective depth;
+    // it is not a global fog layer and fades away above the low-orbit envelope.
+    fog.density = 0.00014
+    fog.visualDensityScalar = clamp(0.14 + lowOrbit * 0.18 + twilight * 0.055, 0.12, 0.38)
+    fog.minimumBrightness = 0.035 + clampedSun * 0.1 + twilight * 0.025
+
+    // Limb/airglow grade. Night gets a small cool/green bias while twilight
+    // gets the brightest rim. All values stay deliberately close to neutral.
+    globe.atmosphereHueShift = -0.012 - darkness * 0.012 + twilight * 0.008
+    globe.atmosphereLightIntensity = 18 + twilight * 18 - darkness * 4
+    globe.atmosphereBrightnessShift = 0.02 + twilight * 0.11 + darkness * 0.012
+    globe.atmosphereSaturationShift = 0.08 + twilight * 0.17 + darkness * 0.035
+    globe.lambertDiffuseMultiplier = 1.08 - darkness * 0.24 + twilight * 0.08
+    if (sky) {
+      sky.hueShift = -0.015 - darkness * 0.014 + twilight * 0.009
+      sky.atmosphereLightIntensity = 68 + twilight * 66 - darkness * 18
+      sky.brightnessShift = 0.018 + twilight * 0.145 + darkness * 0.016
+      sky.saturationShift = 0.08 + twilight * 0.22 + darkness * 0.045
+    }
+    if (scene.sun) scene.sun.glowFactor = 1.2 + twilight * 2.55 + darkness * 0.08
+    if (this.viewer.shadowMap) this.viewer.shadowMap.darkness = 0.27 + darkness * 0.2
+    scene.requestRender()
+  }
+
+  private restoreGraphics(): void {
+    const snapshot = this.graphicsSnapshot
+    if (!snapshot || this.viewer.isDestroyed()) return
+    const scene = this.viewer.scene
+    const post = scene.postProcessStages
+    const bloomUniforms = post.bloom.uniforms as BloomUniforms
+    const fog = scene.fog
+    const globe = scene.globe
+    const sky = scene.skyAtmosphere
+
+    scene.highDynamicRange = snapshot.highDynamicRange
+    post.exposure = snapshot.exposure
+    post.tonemapper = snapshot.tonemapper as typeof post.tonemapper
+    post.bloom.enabled = snapshot.bloomEnabled
+    Object.assign(bloomUniforms, snapshot.bloom)
+    fog.enabled = snapshot.fog.enabled
+    fog.renderable = snapshot.fog.renderable
+    fog.density = snapshot.fog.density
+    fog.visualDensityScalar = snapshot.fog.visualDensityScalar
+    fog.minimumBrightness = snapshot.fog.minimumBrightness
+    fog.maxHeight = snapshot.fog.maxHeight
+    fog.heightFalloff = snapshot.fog.heightFalloff
+    fog.screenSpaceErrorFactor = snapshot.fog.screenSpaceErrorFactor
+    globe.showWaterEffect = snapshot.waterEffect
+    globe.atmosphereHueShift = snapshot.globeHue
+    if (sky && snapshot.skyHue !== null) sky.hueShift = snapshot.skyHue
+    this.graphicsSnapshot = null
   }
 
   private prefetchAhead(now: number): void {
@@ -188,6 +351,7 @@ export class NightSideSystem {
     if (!tile) return
     const columns = provider.tilingScheme.getNumberOfXTilesAtLevel(level)
     const rows = provider.tilingScheme.getNumberOfYTilesAtLevel(level)
+    if (!Number.isFinite(columns) || !Number.isFinite(rows) || columns <= 0 || rows <= 0) return
 
     for (let dy = -1; dy <= 1; dy += 1) {
       const y = Math.floor(tile.y) + dy
