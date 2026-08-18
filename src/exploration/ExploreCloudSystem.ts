@@ -20,6 +20,7 @@ import {
   preloadNasaCloudOpticalThicknessSampler,
   type CloudOpticalThicknessSampler,
 } from './NasaCloudOpticalThicknessField'
+import { computeOrbitalLighting } from './OrbitalLighting'
 
 const CLOUD_COLLECTION_NOISE_DETAIL = 20
 const CLOUD_REGION_STEP_DEGREES = 2.4
@@ -392,15 +393,27 @@ export class ExploreCloudSystem {
     this.collection.removeAll()
 
     const renderedAlpha = clamp(this.opacity * 1.18 * volumeFade, 0, 1)
+    const dayColor = Color.fromCssColorString('#f7fbff')
+    const nightColor = Color.fromCssColorString('#6d8eaa')
     for (const seed of seeds) {
+      const position = Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.altitudeMeters)
+      const sunlight = computeOrbitalLighting(this.viewer.clock.currentTime, position).sunlight
+      const twilight = 1 - Math.abs(sunlight - 0.5) * 2
+      const litBrightness = clamp(seed.brightness * (0.28 + sunlight * 0.72) + Math.max(0, twilight) * 0.08, 0.2, 1.12)
       const denseTint = 1 - seed.density * 0.08
+      const litColor = Color.lerp(nightColor, dayColor, sunlight, new Color())
+      litColor.red *= denseTint
+      litColor.green *= denseTint
+      litColor.blue *= denseTint
+      litColor.alpha = clamp(seed.alpha * renderedAlpha * (0.84 + sunlight * 0.16), 0, 1)
+
       this.collection.add({
-        position: Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.altitudeMeters),
+        position,
         scale: new Cartesian2(seed.scaleX, seed.scaleY),
         maximumSize: new Cartesian3(seed.scaleX, seed.scaleY, seed.depthMeters),
         slice: seed.slice,
-        brightness: seed.brightness,
-        color: new Color(0.97 * denseTint, 0.985 * denseTint, 1 * denseTint, clamp(seed.alpha * renderedAlpha, 0, 1)),
+        brightness: litBrightness,
+        color: litColor,
       })
     }
 
