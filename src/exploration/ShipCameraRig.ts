@@ -8,8 +8,6 @@ export const MAX_CAMERA_DISTANCE_METERS = 50_000
 export const MIN_CAMERA_PITCH = -Math.PI * 0.47
 export const MAX_CAMERA_PITCH = Math.PI * 0.47
 export const DEFAULT_CAMERA_PITCH = 0.18
-export const INITIAL_EARTH_FOCUS_SECONDS = 3.8
-export const INITIAL_EARTH_FOCUS_BLEND_SECONDS = 1.5
 
 export interface CameraOrbitState {
   yaw: number
@@ -23,13 +21,6 @@ export function clampCameraPitch(pitch: number): number {
 
 export function clampCameraDistance(distance: number): number {
   return Math.max(MIN_CAMERA_DISTANCE_METERS, Math.min(MAX_CAMERA_DISTANCE_METERS, distance))
-}
-
-export function initialEarthFocusWeight(secondsRemaining: number): number {
-  if (!Number.isFinite(secondsRemaining) || secondsRemaining <= 0) return 0
-  if (secondsRemaining >= INITIAL_EARTH_FOCUS_BLEND_SECONDS) return 1
-  const t = Math.max(0, Math.min(1, secondsRemaining / INITIAL_EARTH_FOCUS_BLEND_SECONDS))
-  return t * t * (3 - 2 * t)
 }
 
 export function applyCameraOrbit(state: CameraOrbitState, deltaX: number, deltaY: number, sensitivity = 0.004): CameraOrbitState {
@@ -70,7 +61,10 @@ export class ShipCameraRig {
   private cinematicEnabled = true
   private cinematicPhase = 0
   private cinematicHoldSeconds = 0
-  private earthFocusSeconds = 0
+  // The default composition is persistent. Explore keeps the planet dominant
+  // (roughly 70% Earth / 30% open space) until the user deliberately changes
+  // the camera. Recenter restores this canonical composition.
+  private earthFocusActive = false
   private referenceForward = Cartesian3.UNIT_X.clone()
   private referenceRight = Cartesian3.UNIT_Y.clone()
   private referenceUp = Cartesian3.UNIT_Z.clone()
@@ -122,8 +116,8 @@ export class ShipCameraRig {
     this.orbiting = false
     this.cameraDetached = false
     this.cinematicPhase = 0
-    this.cinematicHoldSeconds = INITIAL_EARTH_FOCUS_SECONDS + 0.8
-    this.earthFocusSeconds = INITIAL_EARTH_FOCUS_SECONDS
+    this.cinematicHoldSeconds = 0
+    this.earthFocusActive = true
     this.entered = true
     this.update(position, orientation, Cartesian3.ZERO, 0)
   }
@@ -138,13 +132,13 @@ export class ShipCameraRig {
     this.cameraDetached = false
     this.cinematicPhase = 0
     this.cinematicHoldSeconds = 0
-    this.earthFocusSeconds = 0
+    this.earthFocusActive = false
   }
 
   beginOrbit(): void {
     this.orbiting = true
     this.cameraDetached = true
-    this.earthFocusSeconds = 0
+    this.earthFocusActive = false
     this.cinematicHoldSeconds = 12
     this.referenceForward = this.latestForward.clone()
     this.referenceRight = this.latestRight.clone()
@@ -156,7 +150,7 @@ export class ShipCameraRig {
   }
 
   orbit(deltaX: number, deltaY: number): void {
-    this.earthFocusSeconds = 0
+    this.earthFocusActive = false
     const next = applyCameraOrbit(this.state, deltaX, deltaY, this.orbitSensitivity)
     this.state.yaw = next.yaw
     this.state.pitch = next.pitch
@@ -164,7 +158,7 @@ export class ShipCameraRig {
   }
 
   zoom(deltaY: number): void {
-    this.earthFocusSeconds = 0
+    this.earthFocusActive = false
     this.state.distance = applyCameraZoom(this.state, deltaY).distance
     this.cinematicHoldSeconds = Math.max(this.cinematicHoldSeconds, 8)
   }
@@ -172,15 +166,17 @@ export class ShipCameraRig {
   recenter(): void {
     this.state.yaw = 0
     this.state.pitch = DEFAULT_CAMERA_PITCH
+    this.state.distance = DEFAULT_CAMERA_DISTANCE_METERS
     this.cameraDetached = false
-    this.earthFocusSeconds = 0
-    this.cinematicHoldSeconds = 4
+    this.orbiting = false
+    this.earthFocusActive = true
+    this.cinematicHoldSeconds = 0
   }
 
   setPreset(preset: ExplorationCameraPreset): void {
     this.cameraDetached = false
     this.orbiting = false
-    this.earthFocusSeconds = 0
+    this.earthFocusActive = false
     this.cinematicHoldSeconds = 3
     if (preset === 'ASTRONAUT') {
       this.state.distance = 3_400
@@ -219,8 +215,11 @@ export class ShipCameraRig {
     if (!this.entered) return
     const dt = Math.max(0, Math.min(deltaSeconds, 0.1))
     this.cinematicHoldSeconds = Math.max(0, this.cinematicHoldSeconds - dt)
-    this.earthFocusSeconds = Math.max(0, this.earthFocusSeconds - dt)
-    const cinematicActive = this.cinematicEnabled && !this.orbiting && !this.cameraDetached && this.cinematicHoldSeconds <= 0
+    const cinematicActive = this.cinematicEnabled
+      && !this.earthFocusActive
+      && !this.orbiting
+      && !this.cameraDetached
+      && this.cinematicHoldSeconds <= 0
     if (cinematicActive) this.cinematicPhase += dt
 
     const shipBasis = getShipBasis(orientation)
@@ -273,20 +272,19 @@ export class ShipCameraRig {
     }
 
     const desiredLookTarget = this.desiredLookTarget
-    const earthFocusWeight = this.cameraDetached ? 0 : initialEarthFocusWeight(this.earthFocusSeconds)
-    if (earthFocusWeight > 0) {
-      // Initial Explore composition is intentionally not a full nadir shot.
-      // Aim about 29 degrees below the local horizon: at ordinary LEO heights
-      // the Earth fills roughly 70% of the frame while about 30% remains open
-      // space/limb. This is baked into entry framing rather than exposed as a
-      // setting, then blends smoothly back to normal tracked-object framing.
+    if (this.earthFocusActive && !this.cameraDetached) {
+      // Persistent default Explore composition: point about 29 degrees below
+      // the local horizon. At ordinary LEO heights this keeps roughly 70% of
+      // the frame occupied by Earth and about 30% open to the limb/space.
+      // It remains locked to this composition while the tracked orbital point
+      // moves. Any deliberate orbit/zoom/preset releases the lock; R restores it.
       Cartesian3.multiplyByScalar(forward, 0.88, this.earthwardForward)
       Cartesian3.multiplyByScalar(earthUp, -0.48, this.earthwardDown)
       Cartesian3.add(this.earthwardForward, this.earthwardDown, this.earthwardDirection)
       normalizeOrFallback(this.earthwardDirection, Cartesian3.negate(earthUp, this.earthwardDown), this.earthwardDirection)
       Cartesian3.multiplyByScalar(this.earthwardDirection, 120_000, this.lookAheadOffset)
       Cartesian3.add(position, this.lookAheadOffset, this.earthwardTarget)
-      Cartesian3.lerp(normalLookTarget, this.earthwardTarget, earthFocusWeight, desiredLookTarget)
+      Cartesian3.clone(this.earthwardTarget, desiredLookTarget)
     } else {
       Cartesian3.clone(normalLookTarget, desiredLookTarget)
     }
