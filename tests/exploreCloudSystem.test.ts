@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   cloudShadowOffsetMeters,
   cloudShadowOpacity,
+  createCloudVolumeParts,
   createExploreCloudSeeds,
   exploreCloudMapFade,
   exploreCloudRadiusDegrees,
@@ -16,23 +17,23 @@ describe('ExploreCloudSystem helpers', () => {
     expect(wrapCloudLongitude(540)).toBeCloseTo(-180)
   })
 
-  it('uses volumetric clouds only in low orbit and hands off to the NASA map by 300 km', () => {
+  it('keeps strong 3D clouds in low orbit and a subtle perspective layer up to about 500 km', () => {
     expect(exploreCloudVolumeFade(150_000)).toBeCloseTo(1)
-    expect(exploreCloudVolumeFade(240_000)).toBeGreaterThan(0.4)
-    expect(exploreCloudVolumeFade(240_000)).toBeLessThan(0.6)
-    expect(exploreCloudVolumeFade(300_000)).toBeCloseTo(0)
-    expect(exploreCloudVolumeFade(440_000)).toBeCloseTo(0)
+    expect(exploreCloudVolumeFade(240_000)).toBeGreaterThan(0.85)
+    expect(exploreCloudVolumeFade(300_000)).toBeGreaterThan(0.6)
+    expect(exploreCloudVolumeFade(440_000)).toBeGreaterThan(0)
+    expect(exploreCloudVolumeFade(440_000)).toBeLessThan(0.15)
+    expect(exploreCloudVolumeFade(500_000)).toBeCloseTo(0)
 
-    expect(exploreCloudMapFade(150_000)).toBeCloseTo(0)
-    expect(exploreCloudMapFade(240_000)).toBeGreaterThan(0.4)
-    expect(exploreCloudMapFade(240_000)).toBeLessThan(0.6)
-    expect(exploreCloudMapFade(300_000)).toBeCloseTo(1)
+    expect(exploreCloudMapFade(180_000)).toBeCloseTo(0)
+    expect(exploreCloudMapFade(300_000)).toBeGreaterThan(0.5)
+    expect(exploreCloudMapFade(360_000)).toBeCloseTo(1)
     expect(exploreCloudMapFade(440_000)).toBeCloseTo(1)
   })
 
   it('expands the local cloud neighborhood with camera altitude while keeping it bounded', () => {
     expect(exploreCloudRadiusDegrees(120_000)).toBeLessThan(exploreCloudRadiusDegrees(260_000))
-    expect(exploreCloudRadiusDegrees(5_000_000)).toBeLessThanOrEqual(16)
+    expect(exploreCloudRadiusDegrees(5_000_000)).toBeLessThanOrEqual(15)
   })
 
   it('creates no cinematic clouds when NASA coverage is absent', () => {
@@ -50,12 +51,29 @@ describe('ExploreCloudSystem helpers', () => {
     expect(first.length).toBeLessThanOrEqual(100)
     expect(second).toEqual(first)
     expect(first.every((seed) => seed.altitudeMeters > 1_000)).toBe(true)
-    expect(first.every((seed) => seed.depthMeters >= 3_000)).toBe(true)
-    expect(first.every((seed) => seed.scaleX >= 70_000)).toBe(true)
+    expect(first.every((seed) => seed.depthMeters >= 2_000)).toBe(true)
+    expect(first.every((seed) => seed.scaleX >= 35_000)).toBe(true)
     expect(first.every((seed) => seed.alpha > 0 && seed.alpha <= 1)).toBe(true)
   })
 
-  it('uses NASA cloud-top height when available while preserving deterministic horizontal structure', () => {
+  it('splits a macro formation into stacked volumes that create real parallax', () => {
+    const seed = createExploreCloudSeeds(0, 0, 4, () => 0.7, 20, () => 12_000, () => 55)[0]
+    expect(seed).toBeDefined()
+    const parts = createCloudVolumeParts(seed)
+    expect(parts.length).toBe(3)
+    expect(parts[0].altitudeMeters).toBeLessThan(parts[1].altitudeMeters)
+    expect(parts[2].altitudeMeters).toBeGreaterThan(parts[1].altitudeMeters)
+    expect(parts[0].scaleX).toBeGreaterThan(parts[2].scaleX)
+    expect(new Set(parts.map((part) => `${part.longitudeDeg.toFixed(5)}:${part.latitudeDeg.toFixed(5)}:${part.altitudeMeters.toFixed(0)}`)).size).toBe(parts.length)
+  })
+
+  it('keeps thinner formations to two layers instead of forcing a fake tower', () => {
+    const seed = createExploreCloudSeeds(0, 0, 4, () => 0.55, 20, () => 7_000, () => 1)[0]
+    expect(seed).toBeDefined()
+    expect(createCloudVolumeParts(seed).length).toBe(2)
+  })
+
+  it('uses NASA cloud-top height while preserving deterministic horizontal structure', () => {
     const observedPatch = () => 0.52
     const cloudTopHeight = () => 10_000
     const seeds = createExploreCloudSeeds(0, 0, 5, observedPatch, 50, cloudTopHeight)
@@ -63,7 +81,7 @@ describe('ExploreCloudSystem helpers', () => {
     expect(seeds.length).toBeGreaterThan(0)
     expect(seeds.every((seed) => seed.altitudeMeters + seed.depthMeters * 0.5 <= 10_001)).toBe(true)
     expect(seeds.every((seed) => seed.altitudeMeters + seed.depthMeters * 0.5 >= 9_999)).toBe(true)
-    expect(seeds.every((seed) => seed.depthMeters >= 1_500)).toBe(true)
+    expect(seeds.every((seed) => seed.depthMeters >= 1_300)).toBe(true)
   })
 
   it('uses NASA optical thickness to make dense clouds deeper and more opaque', () => {
@@ -84,7 +102,7 @@ describe('ExploreCloudSystem helpers', () => {
     expect(cloudShadowOpacity(0.8, 1, 1, 1)).toBeGreaterThan(cloudShadowOpacity(0.25, 1, 1, 1))
     expect(cloudShadowOpacity(0.8, 0, 1, 1)).toBeCloseTo(0)
     expect(cloudShadowOpacity(0.8, 1, 0.5, 1)).toBeLessThan(cloudShadowOpacity(0.8, 1, 1, 1))
-    expect(cloudShadowOpacity(1, 1, 1, 1)).toBeLessThan(0.12)
+    expect(cloudShadowOpacity(1, 1, 1, 1)).toBeLessThanOrEqual(0.1)
   })
 
   it('projects longer cloud shadows as the sun approaches the horizon', () => {
