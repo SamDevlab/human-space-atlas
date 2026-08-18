@@ -15,6 +15,11 @@ import {
   preloadNasaCloudTopHeightSampler,
   type CloudTopHeightSampler,
 } from './NasaCloudTopHeightField'
+import {
+  opticalThicknessDensity,
+  preloadNasaCloudOpticalThicknessSampler,
+  type CloudOpticalThicknessSampler,
+} from './NasaCloudOpticalThicknessField'
 
 const CLOUD_COLLECTION_NOISE_DETAIL = 20
 const CLOUD_REGION_STEP_DEGREES = 2.4
@@ -27,7 +32,7 @@ const CLOUD_VOLUME_FULL_BELOW_METERS = 180_000
 const CLOUD_VOLUME_OFF_ABOVE_METERS = 300_000
 const CLOUD_FAR_FIELD_MAX_ALPHA = 1
 
-export const EXPLORE_CLOUD_DISCLOSURE = 'NASA observed cloud field + cloud-top height · cinematic 3D reconstruction'
+export const EXPLORE_CLOUD_DISCLOSURE = 'NASA observed cloud field + cloud-top height + optical thickness · cinematic 3D reconstruction'
 
 export type ExploreCloudSeed = {
   longitudeDeg: number
@@ -39,6 +44,8 @@ export type ExploreCloudSeed = {
   slice: number
   brightness: number
   alpha: number
+  opticalThickness: number | null
+  density: number
 }
 
 export type CloudAlphaSampler = (longitudeDeg: number, latitudeDeg: number) => number
@@ -134,6 +141,7 @@ export function createExploreCloudSeeds(
   sampleAlpha: CloudAlphaSampler,
   maxClouds = CLOUD_MAX_COUNT,
   sampleCloudTopMeters: CloudTopHeightSampler | null = null,
+  sampleOpticalThickness: CloudOpticalThicknessSampler | null = null,
 ): ExploreCloudSeed[] {
   const seeds: ExploreCloudSeed[] = []
   const minLatitude = clamp(centerLatitudeDeg - radiusDegrees, -82, 82)
@@ -168,7 +176,10 @@ export function createExploreCloudSeeds(
 
         const seedLongitude = wrapCloudLongitude(wrappedLongitude + longitudeJitter)
         const seedLatitude = clamp(latitude + latitudeJitter, -82, 82)
-        const horizontalBase = 72_000 + coverage * 155_000
+        const opticalThickness = sampleOpticalThickness?.(seedLongitude, seedLatitude) ?? null
+        const observedDensity = opticalThicknessDensity(opticalThickness)
+        const density = opticalThickness === null ? clamp(0.28 + coverage * 0.62, 0, 1) : observedDensity
+        const horizontalBase = (72_000 + coverage * 155_000) * (0.92 + density * 0.12)
         const scaleX = horizontalBase * (0.82 + shapeNoise * 0.38)
         const scaleY = scaleX * (0.58 + aspectNoise * 0.3)
         const observedTopMeters = sampleCloudTopMeters?.(seedLongitude, seedLatitude) ?? null
@@ -176,15 +187,16 @@ export function createExploreCloudSeeds(
         let depthMeters: number
         let altitudeMeters: number
         if (observedTopMeters !== null && observedTopMeters >= 300 && observedTopMeters <= 20_000) {
-          // NASA determines the cloud-top altitude. The renderer synthesizes a
-          // plausible vertical body below that top because GIBS does not
-          // provide a complete volumetric cloud mesh.
-          depthMeters = clamp(2_200 + coverage * 4_800 + shapeNoise * 2_200, 2_000, Math.max(2_500, observedTopMeters * 0.82))
-          const baseMeters = Math.max(250, observedTopMeters - depthMeters)
+          // NASA determines the top altitude while optical thickness controls
+          // how much vertical body is reconstructed below it. Thin clouds stay
+          // flatter; optically thick systems become deeper and more imposing.
+          const desiredDepth = (1_800 + coverage * 3_600 + shapeNoise * 1_800) * (0.72 + density * 0.9)
+          depthMeters = clamp(desiredDepth, 1_500, Math.max(2_000, observedTopMeters * 0.86))
+          const baseMeters = Math.max(180, observedTopMeters - depthMeters)
           altitudeMeters = baseMeters + depthMeters * 0.5
         } else {
-          const baseAltitude = 1_600 + heightNoise * 4_200
-          depthMeters = 5_000 + coverage * 9_500 + shapeNoise * 3_500
+          const baseAltitude = 1_300 + heightNoise * 3_900
+          depthMeters = (3_400 + coverage * 6_600 + shapeNoise * 2_800) * (0.7 + density * 0.85)
           altitudeMeters = baseAltitude + depthMeters * 0.5
         }
 
@@ -195,9 +207,11 @@ export function createExploreCloudSeeds(
           scaleX,
           scaleY,
           depthMeters,
-          slice: 0.42 + hash01(cellX * 61 + clusterIndex * 67 + 37, cellY * 71 + 41) * 0.18,
-          brightness: 0.78 + coverage * 0.2 + heightNoise * 0.06,
-          alpha: clamp(0.42 + coverage * 0.52, 0.42, 0.96),
+          slice: clamp(0.36 + density * 0.18 + hash01(cellX * 61 + clusterIndex * 67 + 37, cellY * 71 + 41) * 0.12, 0.34, 0.68),
+          brightness: clamp(0.82 + coverage * 0.12 + (1 - density) * 0.08 + heightNoise * 0.04, 0.8, 1.08),
+          alpha: clamp(0.3 + coverage * 0.34 + density * 0.44, 0.3, 1),
+          opticalThickness,
+          density,
         })
       }
     }
@@ -216,6 +230,7 @@ export class ExploreCloudSystem {
   private farFieldLayer: ImageryLayer | null = null
   private sampleAlpha: CloudAlphaSampler | null = null
   private sampleCloudTopMeters: CloudTopHeightSampler | null = null
+  private sampleOpticalThickness: CloudOpticalThicknessSampler | null = null
   private running = false
   private destroyed = false
   private loadGeneration = 0
@@ -244,13 +259,15 @@ export class ExploreCloudSystem {
     }
 
     if (!this.sampleAlpha || !this.farFieldLayer) {
-      const [texture, cloudTopSampler] = await Promise.all([
+      const [texture, cloudTopSampler, opticalThicknessSampler] = await Promise.all([
         preloadNasaCloudTexture(),
         preloadNasaCloudTopHeightSampler(NASA_GIBS_CLOUD_OBSERVATION_DATE),
+        preloadNasaCloudOpticalThicknessSampler(NASA_GIBS_CLOUD_OBSERVATION_DATE),
       ])
       if (this.destroyed || generation !== this.loadGeneration || this.viewer.isDestroyed()) return
       this.sampleAlpha = createCanvasCloudAlphaSampler(texture)
       this.sampleCloudTopMeters = cloudTopSampler
+      this.sampleOpticalThickness = opticalThicknessSampler
 
       if (!this.farFieldLayer) {
         const provider = await createNasaCloudProvider(NASA_GIBS_CLOUD_OBSERVATION_DATE, texture)
@@ -307,6 +324,7 @@ export class ExploreCloudSystem {
     this.collection = null
     this.sampleAlpha = null
     this.sampleCloudTopMeters = null
+    this.sampleOpticalThickness = null
   }
 
   private update(): void {
@@ -337,6 +355,7 @@ export class ExploreCloudSystem {
 
   private rebuild(force: boolean): void {
     if (!this.collection || !this.sampleAlpha || this.viewer.isDestroyed()) return
+    void force
     const cartographic = this.viewer.camera.positionCartographic
     const longitudeDeg = cartographic.longitude * 180 / Math.PI
     const latitudeDeg = cartographic.latitude * 180 / Math.PI
@@ -368,18 +387,20 @@ export class ExploreCloudSystem {
       this.sampleAlpha,
       CLOUD_MAX_COUNT,
       this.sampleCloudTopMeters,
+      this.sampleOpticalThickness,
     )
     this.collection.removeAll()
 
     const renderedAlpha = clamp(this.opacity * 1.18 * volumeFade, 0, 1)
     for (const seed of seeds) {
+      const denseTint = 1 - seed.density * 0.08
       this.collection.add({
         position: Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.altitudeMeters),
         scale: new Cartesian2(seed.scaleX, seed.scaleY),
         maximumSize: new Cartesian3(seed.scaleX, seed.scaleY, seed.depthMeters),
         slice: seed.slice,
         brightness: seed.brightness,
-        color: Color.fromCssColorString('#f7fbff').withAlpha(clamp(seed.alpha * renderedAlpha, 0, 0.96)),
+        color: new Color(0.97 * denseTint, 0.985 * denseTint, 1 * denseTint, clamp(seed.alpha * renderedAlpha, 0, 1)),
       })
     }
 
