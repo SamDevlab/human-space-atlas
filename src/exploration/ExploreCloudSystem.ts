@@ -3,7 +3,13 @@ import {
   Cartesian2,
   Cartesian3,
   Color,
+  ColorGeometryInstanceAttribute,
+  EllipseGeometry,
+  Ellipsoid,
+  GeometryInstance,
   ImageryLayer,
+  PerInstanceColorAppearance,
+  Primitive,
   Viewer,
 } from 'cesium'
 import {
@@ -28,10 +34,12 @@ const CLOUD_REGION_REBUILD_DEGREES = 3.2
 const CLOUD_REGION_MAX_RADIUS_DEGREES = 16
 const CLOUD_REGION_MIN_RADIUS_DEGREES = 7
 const CLOUD_MAX_COUNT = 240
+const CLOUD_MAX_SHADOW_COUNT = 120
 const CLOUD_ALPHA_REFERENCE = 0.48
 const CLOUD_VOLUME_FULL_BELOW_METERS = 180_000
 const CLOUD_VOLUME_OFF_ABOVE_METERS = 300_000
 const CLOUD_FAR_FIELD_MAX_ALPHA = 1
+const CLOUD_SHADOW_MAX_OFFSET_METERS = 180_000
 
 export const EXPLORE_CLOUD_DISCLOSURE = 'NASA observed cloud field + cloud-top height + optical thickness · cinematic 3D reconstruction'
 
@@ -101,6 +109,21 @@ export function exploreCloudMapFade(cameraHeightMeters: number): number {
 
 export function exploreCloudRadiusDegrees(cameraHeightMeters: number): number {
   return clamp(7 + cameraHeightMeters / 80_000, CLOUD_REGION_MIN_RADIUS_DEGREES, CLOUD_REGION_MAX_RADIUS_DEGREES)
+}
+
+/** Shadow fades out at night, with thin clouds and during the 2D/3D handoff. */
+export function cloudShadowOpacity(density: number, sunlight: number, opacity: number, volumeFade: number): number {
+  const lit = smoothstep01((clamp(sunlight, 0, 1) - 0.08) / 0.72)
+  const dense = smoothstep01((clamp(density, 0, 1) - 0.12) / 0.78)
+  return clamp(opacity, 0, 1) * clamp(volumeFade, 0, 1) * lit * dense * 0.115
+}
+
+/** Approximate horizontal displacement of a cloud shadow from solar elevation. */
+export function cloudShadowOffsetMeters(cloudAltitudeMeters: number, sunElevationSin: number): number {
+  const elevationSin = clamp(sunElevationSin, 0, 1)
+  if (elevationSin <= 0.055) return CLOUD_SHADOW_MAX_OFFSET_METERS
+  const horizontal = Math.sqrt(Math.max(0, 1 - elevationSin * elevationSin))
+  return clamp(Math.max(0, cloudAltitudeMeters) * horizontal / elevationSin, 0, CLOUD_SHADOW_MAX_OFFSET_METERS)
 }
 
 export function createCanvasCloudAlphaSampler(texture: HTMLCanvasElement): CloudAlphaSampler {
@@ -229,6 +252,7 @@ export class ExploreCloudSystem {
   private readonly viewer: Viewer
   private collection: CloudCollectionLike | null = null
   private farFieldLayer: ImageryLayer | null = null
+  private shadowPrimitive: Primitive | null = null
   private sampleAlpha: CloudAlphaSampler | null = null
   private sampleCloudTopMeters: CloudTopHeightSampler | null = null
   private sampleOpticalThickness: CloudOpticalThicknessSampler | null = null
@@ -236,6 +260,7 @@ export class ExploreCloudSystem {
   private destroyed = false
   private loadGeneration = 0
   private opacity = 0.72
+  private shadowsEnabled = true
   private lastLongitudeDeg: number | null = null
   private lastLatitudeDeg: number | null = null
   private lastAltitudeBucket = -1
@@ -246,8 +271,9 @@ export class ExploreCloudSystem {
     this.viewer = viewer
   }
 
-  async start(opacity = 0.72): Promise<void> {
+  async start(opacity = 0.72, shadowsEnabled = true): Promise<void> {
     this.opacity = clamp(opacity, 0, 1)
+    this.shadowsEnabled = shadowsEnabled
     if (this.destroyed || this.viewer.isDestroyed()) return
     const generation = ++this.loadGeneration
 
@@ -299,6 +325,12 @@ export class ExploreCloudSystem {
     this.rebuild(true)
   }
 
+  setShadowsEnabled(enabled: boolean): void {
+    if (enabled === this.shadowsEnabled) return
+    this.shadowsEnabled = enabled
+    this.rebuild(true)
+  }
+
   stop(): void {
     this.loadGeneration += 1
     if (this.running && !this.viewer.isDestroyed()) this.viewer.scene.preRender.removeEventListener(this.onPreRender)
@@ -307,6 +339,7 @@ export class ExploreCloudSystem {
       this.collection.show = false
       this.collection.removeAll()
     }
+    this.clearShadowPrimitive()
     if (this.farFieldLayer && !this.viewer.isDestroyed()) {
       this.viewer.imageryLayers.remove(this.farFieldLayer, false)
     }
@@ -372,6 +405,7 @@ export class ExploreCloudSystem {
     if (volumeFade <= 0.015) {
       this.collection.show = false
       this.collection.removeAll()
+      this.clearShadowPrimitive()
       this.lastLongitudeDeg = longitudeDeg
       this.lastLatitudeDeg = latitudeDeg
       this.lastAltitudeBucket = Math.floor(altitudeMeters / 60_000)
@@ -391,13 +425,18 @@ export class ExploreCloudSystem {
       this.sampleOpticalThickness,
     )
     this.collection.removeAll()
+    this.clearShadowPrimitive()
 
     const renderedAlpha = clamp(this.opacity * 1.18 * volumeFade, 0, 1)
     const dayColor = Color.fromCssColorString('#f7fbff')
     const nightColor = Color.fromCssColorString('#6d8eaa')
+    const shadowInstances: GeometryInstance[] = []
+    let shadowCount = 0
+
     for (const seed of seeds) {
       const position = Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.altitudeMeters)
-      const sunlight = computeOrbitalLighting(this.viewer.clock.currentTime, position).sunlight
+      const lighting = computeOrbitalLighting(this.viewer.clock.currentTime, position)
+      const sunlight = lighting.sunlight
       const twilight = 1 - Math.abs(sunlight - 0.5) * 2
       const litBrightness = clamp(seed.brightness * (0.28 + sunlight * 0.72) + Math.max(0, twilight) * 0.08, 0.2, 1.12)
       const denseTint = 1 - seed.density * 0.08
@@ -415,6 +454,67 @@ export class ExploreCloudSystem {
         brightness: litBrightness,
         color: litColor,
       })
+
+      if (!this.shadowsEnabled || shadowCount >= CLOUD_MAX_SHADOW_COUNT || !lighting.sunPositionFixed) continue
+      const shadowAlpha = cloudShadowOpacity(seed.density, sunlight, this.opacity, volumeFade)
+      if (shadowAlpha <= 0.004) continue
+
+      const up = Ellipsoid.WGS84.geodeticSurfaceNormal(position, new Cartesian3())
+      const toSun = Cartesian3.subtract(lighting.sunPositionFixed, position, new Cartesian3())
+      if (Cartesian3.magnitude(toSun) <= 1) continue
+      Cartesian3.normalize(toSun, toSun)
+      const sunElevationSin = Cartesian3.dot(toSun, up)
+      if (sunElevationSin <= 0.035) continue
+
+      const radialSun = Cartesian3.multiplyByScalar(up, sunElevationSin, new Cartesian3())
+      const tangentSun = Cartesian3.subtract(toSun, radialSun, new Cartesian3())
+      const offsetMeters = cloudShadowOffsetMeters(seed.altitudeMeters, sunElevationSin)
+      const surface = Ellipsoid.WGS84.scaleToGeodeticSurface(position, new Cartesian3())
+      if (!surface) continue
+      let shadowSurface = surface
+      if (offsetMeters > 1 && Cartesian3.magnitude(tangentSun) > 0.0001) {
+        Cartesian3.normalize(tangentSun, tangentSun)
+        const displaced = Cartesian3.subtract(surface, Cartesian3.multiplyByScalar(tangentSun, offsetMeters, new Cartesian3()), new Cartesian3())
+        shadowSurface = Ellipsoid.WGS84.scaleToGeodeticSurface(displaced, new Cartesian3()) ?? surface
+      }
+
+      const rotation = ((seed.longitudeDeg * 0.013 + seed.latitudeDeg * 0.021) % Math.PI + Math.PI) % Math.PI
+      const outerColor = new Color(0.018, 0.03, 0.045, shadowAlpha * 0.34)
+      const innerColor = new Color(0.012, 0.024, 0.036, shadowAlpha * 0.58)
+      shadowInstances.push(
+        new GeometryInstance({
+          geometry: new EllipseGeometry({
+            center: shadowSurface,
+            semiMajorAxis: Math.max(2_000, seed.scaleX * 0.48),
+            semiMinorAxis: Math.max(2_000, seed.scaleY * 0.48),
+            height: 800,
+            rotation,
+            vertexFormat: PerInstanceColorAppearance.VERTEX_FORMAT,
+          }),
+          attributes: { color: ColorGeometryInstanceAttribute.fromColor(outerColor) },
+        }),
+        new GeometryInstance({
+          geometry: new EllipseGeometry({
+            center: shadowSurface,
+            semiMajorAxis: Math.max(1_500, seed.scaleX * 0.34),
+            semiMinorAxis: Math.max(1_500, seed.scaleY * 0.34),
+            height: 820,
+            rotation,
+            vertexFormat: PerInstanceColorAppearance.VERTEX_FORMAT,
+          }),
+          attributes: { color: ColorGeometryInstanceAttribute.fromColor(innerColor) },
+        }),
+      )
+      shadowCount += 1
+    }
+
+    if (shadowInstances.length > 0) {
+      this.shadowPrimitive = this.viewer.scene.primitives.add(new Primitive({
+        geometryInstances: shadowInstances,
+        appearance: new PerInstanceColorAppearance({ flat: true, translucent: true, closed: false }),
+        asynchronous: false,
+        allowPicking: false,
+      })) as Primitive
     }
 
     this.collection.show = seeds.length > 0 && volumeFade > 0.015
@@ -423,5 +523,11 @@ export class ExploreCloudSystem {
     this.lastAltitudeBucket = Math.floor(altitudeMeters / 60_000)
     this.lastVolumeFade = volumeFade
     this.viewer.scene.requestRender()
+  }
+
+  private clearShadowPrimitive(): void {
+    if (!this.shadowPrimitive) return
+    if (!this.viewer.isDestroyed()) this.viewer.scene.primitives.remove(this.shadowPrimitive)
+    this.shadowPrimitive = null
   }
 }
