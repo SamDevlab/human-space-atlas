@@ -60,6 +60,9 @@ export class ShipCameraRig {
   private orbiting = false
   private cameraDetached = false
   private entered = false
+  private cinematicEnabled = true
+  private cinematicPhase = 0
+  private cinematicHoldSeconds = 0
   private referenceForward = Cartesian3.UNIT_X.clone()
   private referenceRight = Cartesian3.UNIT_Y.clone()
   private referenceUp = Cartesian3.UNIT_Z.clone()
@@ -114,6 +117,8 @@ export class ShipCameraRig {
     this.followOrientation = orientation.clone()
     this.orbiting = false
     this.cameraDetached = false
+    this.cinematicPhase = 0
+    this.cinematicHoldSeconds = 2.5
     this.entered = true
     this.update(position, orientation, Cartesian3.ZERO, 0)
   }
@@ -126,11 +131,14 @@ export class ShipCameraRig {
     this.actualLookTarget = null
     this.orbiting = false
     this.cameraDetached = false
+    this.cinematicPhase = 0
+    this.cinematicHoldSeconds = 0
   }
 
   beginOrbit(): void {
     this.orbiting = true
     this.cameraDetached = true
+    this.cinematicHoldSeconds = 12
     this.referenceForward = this.latestForward.clone()
     this.referenceRight = this.latestRight.clone()
     this.referenceUp = this.latestUp.clone()
@@ -144,21 +152,25 @@ export class ShipCameraRig {
     const next = applyCameraOrbit(this.state, deltaX, deltaY, this.orbitSensitivity)
     this.state.yaw = next.yaw
     this.state.pitch = next.pitch
+    this.cinematicHoldSeconds = Math.max(this.cinematicHoldSeconds, 8)
   }
 
   zoom(deltaY: number): void {
     this.state.distance = applyCameraZoom(this.state, deltaY).distance
+    this.cinematicHoldSeconds = Math.max(this.cinematicHoldSeconds, 8)
   }
 
   recenter(): void {
     this.state.yaw = 0
     this.state.pitch = DEFAULT_CAMERA_PITCH
     this.cameraDetached = false
+    this.cinematicHoldSeconds = 4
   }
 
   setPreset(preset: ExplorationCameraPreset): void {
     this.cameraDetached = false
     this.orbiting = false
+    this.cinematicHoldSeconds = 3
     if (preset === 'ASTRONAUT') {
       this.state.distance = 3_400
       this.state.pitch = 0.06
@@ -179,6 +191,11 @@ export class ShipCameraRig {
     this.rollInfluence = 0.1
   }
 
+  setCinematicMode(enabled: boolean): void {
+    this.cinematicEnabled = enabled
+    this.cinematicHoldSeconds = enabled ? 2 : 0
+  }
+
   isOrbiting(): boolean {
     return this.orbiting
   }
@@ -190,6 +207,9 @@ export class ShipCameraRig {
   update(position: Cartesian3, orientation: Quaternion, velocity: Cartesian3, deltaSeconds: number): void {
     if (!this.entered) return
     const dt = Math.max(0, Math.min(deltaSeconds, 0.1))
+    this.cinematicHoldSeconds = Math.max(0, this.cinematicHoldSeconds - dt)
+    const cinematicActive = this.cinematicEnabled && !this.orbiting && !this.cameraDetached && this.cinematicHoldSeconds <= 0
+    if (cinematicActive) this.cinematicPhase += dt
 
     const shipBasis = getShipBasis(orientation)
     const targetFrame = this.targetFrame
@@ -207,16 +227,27 @@ export class ShipCameraRig {
     const forward = this.cameraDetached ? this.referenceForward : followedBasis.forward
     const right = this.cameraDetached ? this.referenceRight : followedBasis.right
     const shipUp = this.cameraDetached ? this.referenceUp : followedBasis.up
-    const cosPitch = Math.cos(this.state.pitch)
+
+    // Automatic camera motion is intentionally tiny and very slow. It creates
+    // a living orbital shot while the user is hands-off, then yields immediately
+    // to manual orbit/zoom and stays out of the way until the view is recentered.
+    const cinematicYaw = cinematicActive ? Math.sin(this.cinematicPhase * 0.11) * 0.16 : 0
+    const cinematicPitch = cinematicActive ? Math.sin(this.cinematicPhase * 0.071 + 1.7) * 0.025 : 0
+    const cinematicDistanceScale = cinematicActive ? 1 + Math.sin(this.cinematicPhase * 0.053 + 0.8) * 0.028 : 1
+    const effectiveYaw = this.state.yaw + cinematicYaw
+    const effectivePitch = clampCameraPitch(this.state.pitch + cinematicPitch)
+    const effectiveDistance = clampCameraDistance(this.state.distance * cinematicDistanceScale)
+
+    const cosPitch = Math.cos(effectivePitch)
     const orbitOffset = this.orbitOffset
-    Cartesian3.multiplyByScalar(forward, -Math.cos(this.state.yaw) * cosPitch, this.orbitForward)
-    Cartesian3.multiplyByScalar(right, Math.sin(this.state.yaw) * cosPitch, this.orbitRight)
-    Cartesian3.multiplyByScalar(shipUp, Math.sin(this.state.pitch), this.orbitUp)
+    Cartesian3.multiplyByScalar(forward, -Math.cos(effectiveYaw) * cosPitch, this.orbitForward)
+    Cartesian3.multiplyByScalar(right, Math.sin(effectiveYaw) * cosPitch, this.orbitRight)
+    Cartesian3.multiplyByScalar(shipUp, Math.sin(effectivePitch), this.orbitUp)
     Cartesian3.add(this.orbitForward, this.orbitRight, orbitOffset)
     Cartesian3.add(orbitOffset, this.orbitUp, orbitOffset)
     Cartesian3.normalize(orbitOffset, orbitOffset)
 
-    const desiredPosition = Cartesian3.add(position, Cartesian3.multiplyByScalar(orbitOffset, this.state.distance, this.lookAheadOffset), this.desiredPosition)
+    const desiredPosition = Cartesian3.add(position, Cartesian3.multiplyByScalar(orbitOffset, effectiveDistance, this.lookAheadOffset), this.desiredPosition)
     const speed = Cartesian3.magnitude(velocity)
     const desiredLookAhead = this.lookAhead + Math.min(speed * 0.01, 500)
     const lookAheadSmoothing = 1 - Math.exp(-3.5 * Math.max(dt, 0.016))
