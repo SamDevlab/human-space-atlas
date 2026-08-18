@@ -11,6 +11,10 @@ import {
   NASA_GIBS_CLOUD_OBSERVATION_DATE,
   preloadNasaCloudTexture,
 } from '../lib/earthLayers'
+import {
+  preloadNasaCloudTopHeightSampler,
+  type CloudTopHeightSampler,
+} from './NasaCloudTopHeightField'
 
 const CLOUD_COLLECTION_NOISE_DETAIL = 20
 const CLOUD_REGION_STEP_DEGREES = 2.4
@@ -23,7 +27,7 @@ const CLOUD_VOLUME_FULL_BELOW_METERS = 180_000
 const CLOUD_VOLUME_OFF_ABOVE_METERS = 300_000
 const CLOUD_FAR_FIELD_MAX_ALPHA = 1
 
-export const EXPLORE_CLOUD_DISCLOSURE = 'NASA observed cloud field · cinematic 3D reconstruction'
+export const EXPLORE_CLOUD_DISCLOSURE = 'NASA observed cloud field + cloud-top height · cinematic 3D reconstruction'
 
 export type ExploreCloudSeed = {
   longitudeDeg: number
@@ -57,9 +61,6 @@ type CloudCollectionConstructor = new (options?: {
   noiseOffset?: Cartesian3
 }) => CloudCollectionLike
 
-// CloudCollection is part of the public Cesium runtime API. Access it through
-// the namespace here so this module remains compatible with the package's
-// generated declaration layout across Cesium minor releases.
 const CloudCollectionCtor = (Cesium as unknown as { CloudCollection: CloudCollectionConstructor }).CloudCollection
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -80,22 +81,11 @@ export function wrapCloudLongitude(longitudeDeg: number): number {
   return ((longitudeDeg + 180) % 360 + 360) % 360 - 180
 }
 
-/**
- * Cinematic volumes are a low-orbit detail layer, not the global cloud map.
- * They stay fully visible below 180 km and fade out by 300 km. This prevents
- * the isolated "snowball" look that appears when individual CumulusCloud
- * volumes are viewed from hundreds of kilometres away.
- */
 export function exploreCloudVolumeFade(cameraHeightMeters: number): number {
   const range = CLOUD_VOLUME_OFF_ABOVE_METERS - CLOUD_VOLUME_FULL_BELOW_METERS
   return 1 - smoothstep01((cameraHeightMeters - CLOUD_VOLUME_FULL_BELOW_METERS) / range)
 }
 
-/**
- * The NASA-derived 2D field is the far-orbit representation. It crossfades
- * inversely with the local 3D reconstruction so the Explore camera sees one
- * continuous weather system instead of either a flat decal or floating dots.
- */
 export function exploreCloudMapFade(cameraHeightMeters: number): number {
   const range = CLOUD_VOLUME_OFF_ABOVE_METERS - CLOUD_VOLUME_FULL_BELOW_METERS
   return smoothstep01((cameraHeightMeters - CLOUD_VOLUME_FULL_BELOW_METERS) / range)
@@ -137,17 +127,13 @@ function localCloudCoverage(sampleAlpha: CloudAlphaSampler, longitudeDeg: number
   return clamp(coverage / CLOUD_ALPHA_REFERENCE, 0, 1)
 }
 
-/**
- * Convert the observed NASA mask into broad, overlapping cloud banks.
- * A coarser geographic grid plus several overlapping lobes per strong cell
- * reads as fronts/systems from low orbit instead of hundreds of tiny dots.
- */
 export function createExploreCloudSeeds(
   centerLongitudeDeg: number,
   centerLatitudeDeg: number,
   radiusDegrees: number,
   sampleAlpha: CloudAlphaSampler,
   maxClouds = CLOUD_MAX_COUNT,
+  sampleCloudTopMeters: CloudTopHeightSampler | null = null,
 ): ExploreCloudSeed[] {
   const seeds: ExploreCloudSeed[] = []
   const minLatitude = clamp(centerLatitudeDeg - radiusDegrees, -82, 82)
@@ -174,27 +160,37 @@ export function createExploreCloudSeeds(
       for (let clusterIndex = 0; clusterIndex < clusterCount && seeds.length < maxClouds; clusterIndex += 1) {
         const jitterX = hash01(cellX * 13 + clusterIndex * 7 + 3, cellY * 11 + 5) - 0.5
         const jitterY = hash01(cellX * 17 + 9, cellY * 19 + clusterIndex * 13 + 7) - 0.5
-        // Keep lobes close enough to overlap. This makes each observed cell a
-        // cloud bank rather than a collection of unrelated points.
         const longitudeJitter = jitterX * CLOUD_REGION_STEP_DEGREES * 0.42 / latitudeCosine
         const latitudeJitter = jitterY * CLOUD_REGION_STEP_DEGREES * 0.36
         const shapeNoise = hash01(cellX * 23 + clusterIndex * 31 + 11, cellY * 29 + 17)
         const heightNoise = hash01(cellX * 37 + 19, cellY * 41 + clusterIndex * 43 + 23)
         const aspectNoise = hash01(cellX * 47 + clusterIndex * 53 + 29, cellY * 59 + 31)
 
-        // Broad macro-scale lobes are intentional: at 120–250 km the camera
-        // reads them as continuous weather systems with parallax, while the
-        // NASA mask still determines where those systems may exist.
+        const seedLongitude = wrapCloudLongitude(wrappedLongitude + longitudeJitter)
+        const seedLatitude = clamp(latitude + latitudeJitter, -82, 82)
         const horizontalBase = 72_000 + coverage * 155_000
         const scaleX = horizontalBase * (0.82 + shapeNoise * 0.38)
         const scaleY = scaleX * (0.58 + aspectNoise * 0.3)
-        const baseAltitude = 1_600 + heightNoise * 4_200
-        const depthMeters = 5_000 + coverage * 9_500 + shapeNoise * 3_500
-        const altitudeMeters = baseAltitude + depthMeters * 0.5
+        const observedTopMeters = sampleCloudTopMeters?.(seedLongitude, seedLatitude) ?? null
+
+        let depthMeters: number
+        let altitudeMeters: number
+        if (observedTopMeters !== null && observedTopMeters >= 300 && observedTopMeters <= 20_000) {
+          // NASA determines the cloud-top altitude. The renderer synthesizes a
+          // plausible vertical body below that top because GIBS does not
+          // provide a complete volumetric cloud mesh.
+          depthMeters = clamp(2_200 + coverage * 4_800 + shapeNoise * 2_200, 2_000, Math.max(2_500, observedTopMeters * 0.82))
+          const baseMeters = Math.max(250, observedTopMeters - depthMeters)
+          altitudeMeters = baseMeters + depthMeters * 0.5
+        } else {
+          const baseAltitude = 1_600 + heightNoise * 4_200
+          depthMeters = 5_000 + coverage * 9_500 + shapeNoise * 3_500
+          altitudeMeters = baseAltitude + depthMeters * 0.5
+        }
 
         seeds.push({
-          longitudeDeg: wrapCloudLongitude(wrappedLongitude + longitudeJitter),
-          latitudeDeg: clamp(latitude + latitudeJitter, -82, 82),
+          longitudeDeg: seedLongitude,
+          latitudeDeg: seedLatitude,
           altitudeMeters,
           scaleX,
           scaleY,
@@ -219,6 +215,7 @@ export class ExploreCloudSystem {
   private collection: CloudCollectionLike | null = null
   private farFieldLayer: ImageryLayer | null = null
   private sampleAlpha: CloudAlphaSampler | null = null
+  private sampleCloudTopMeters: CloudTopHeightSampler | null = null
   private running = false
   private destroyed = false
   private loadGeneration = 0
@@ -247,9 +244,13 @@ export class ExploreCloudSystem {
     }
 
     if (!this.sampleAlpha || !this.farFieldLayer) {
-      const texture = await preloadNasaCloudTexture()
+      const [texture, cloudTopSampler] = await Promise.all([
+        preloadNasaCloudTexture(),
+        preloadNasaCloudTopHeightSampler(NASA_GIBS_CLOUD_OBSERVATION_DATE),
+      ])
       if (this.destroyed || generation !== this.loadGeneration || this.viewer.isDestroyed()) return
       this.sampleAlpha = createCanvasCloudAlphaSampler(texture)
+      this.sampleCloudTopMeters = cloudTopSampler
 
       if (!this.farFieldLayer) {
         const provider = await createNasaCloudProvider(NASA_GIBS_CLOUD_OBSERVATION_DATE, texture)
@@ -305,6 +306,7 @@ export class ExploreCloudSystem {
     if (this.collection && !this.viewer.isDestroyed()) this.viewer.scene.primitives.remove(this.collection)
     this.collection = null
     this.sampleAlpha = null
+    this.sampleCloudTopMeters = null
   }
 
   private update(): void {
@@ -359,7 +361,14 @@ export class ExploreCloudSystem {
     }
 
     const radiusDegrees = exploreCloudRadiusDegrees(altitudeMeters)
-    const seeds = createExploreCloudSeeds(longitudeDeg, latitudeDeg, radiusDegrees, this.sampleAlpha)
+    const seeds = createExploreCloudSeeds(
+      longitudeDeg,
+      latitudeDeg,
+      radiusDegrees,
+      this.sampleAlpha,
+      CLOUD_MAX_COUNT,
+      this.sampleCloudTopMeters,
+    )
     this.collection.removeAll()
 
     const renderedAlpha = clamp(this.opacity * 1.18 * volumeFade, 0, 1)
