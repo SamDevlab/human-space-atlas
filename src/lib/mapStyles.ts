@@ -1,5 +1,5 @@
 import * as Cesium from 'cesium'
-import type { ImageryLayer, ImageryLayerCollection, ImageryProvider, ProviderViewModel } from 'cesium'
+import type { ImageryLayer, ImageryProvider, ProviderViewModel } from 'cesium'
 
 export interface MapStyleDefinition {
   id: string
@@ -33,7 +33,7 @@ type TransitionState = {
   startedAt: number | null
 }
 
-type StreamingCollection = ImageryLayerCollection & {
+type StreamingCollection = Cesium.ImageryLayerCollection & {
   __hsaBaseTransition?: TransitionState | null
 }
 
@@ -59,12 +59,12 @@ function providerLooksLikeOverlay(layer: ImageryLayer): boolean {
  */
 function installBaseLayerCrossfade(): void {
   if (typeof window === 'undefined' || typeof requestAnimationFrame === 'undefined') return
-  const prototype = Cesium.ImageryLayerCollection.prototype as typeof Cesium.ImageryLayerCollection.prototype & { [transitionMarker]?: boolean }
+  const prototype = Cesium.ImageryLayerCollection.prototype as any
   if (prototype[transitionMarker]) return
   prototype[transitionMarker] = true
 
-  const originalRemove = prototype.remove
-  const originalAddImageryProvider = prototype.addImageryProvider
+  const originalRemove = prototype.remove as Cesium.ImageryLayerCollection['remove']
+  const originalAddImageryProvider = prototype.addImageryProvider as Cesium.ImageryLayerCollection['addImageryProvider']
   const finishTransition = (collection: StreamingCollection) => {
     const transition = collection.__hsaBaseTransition
     if (!transition) return
