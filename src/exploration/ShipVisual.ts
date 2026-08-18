@@ -25,6 +25,7 @@ import {
   Viewer,
 } from 'cesium'
 import { getShipBasis } from './flightModel'
+import { computeOrbitalLighting } from './OrbitalLighting'
 
 export const SHIP_VISUAL_LENGTH_METERS = 3_200
 
@@ -51,6 +52,7 @@ export interface ShipVisualSnapshot {
  * in a third-person orbital composition. Physics remains in meters.
  */
 export class ShipVisual {
+  private readonly viewer: Viewer
   private readonly collection: PrimitiveCollection
   private readonly components: VisualComponent[] = []
   private readonly engines: PointPrimitiveCollection
@@ -61,9 +63,14 @@ export class ShipVisual {
   private readonly modelEntity: Entity
   private readonly modelPosition: ConstantPositionProperty
   private readonly modelOrientation: ConstantProperty
+  private readonly modelColor: ConstantProperty
+  private readonly modelBlendAmount: ConstantProperty
   private visible = false
+  private sunlightFactor = 1
+  private lastLightingSampleAt = 0
 
   constructor(viewer: Viewer) {
+    this.viewer = viewer
     this.collection = viewer.scene.primitives.add(new PrimitiveCollection())
     const hull = Color.fromCssColorString('#1d3446')
     const hullHighlight = Color.fromCssColorString('#365a72')
@@ -102,6 +109,8 @@ export class ShipVisual {
 
     this.modelPosition = new ConstantPositionProperty(Cartesian3.ZERO)
     this.modelOrientation = new ConstantProperty(Quaternion.IDENTITY)
+    this.modelColor = new ConstantProperty(Color.WHITE)
+    this.modelBlendAmount = new ConstantProperty(0)
     this.modelEntity = viewer.entities.add(new Entity({
       name: 'HSA Explorer · Voyager probe',
       show: false,
@@ -111,11 +120,12 @@ export class ShipVisual {
         scale: new ConstantProperty(58),
         minimumPixelSize: new ConstantProperty(120),
         // Voyager Probe (B) includes embedded NASA texture images and PBR
-        // materials. Keep the model's original painted/gold/black livery.
+        // materials. Keep the model's original painted/gold/black livery while
+        // allowing a subtle blue eclipse tint when Earth occludes the Sun.
         uri: new ConstantProperty('/assets/voyager-probe-b.glb'),
-        color: new ConstantProperty(Color.WHITE),
+        color: this.modelColor,
         colorBlendMode: new ConstantProperty(ColorBlendMode.MIX),
-        colorBlendAmount: new ConstantProperty(0),
+        colorBlendAmount: this.modelBlendAmount,
         runAnimations: new ConstantProperty(false),
         shadows: new ConstantProperty(ShadowMode.ENABLED),
       }),
@@ -123,6 +133,20 @@ export class ShipVisual {
   }
 
   update(position: Cartesian3, orientation: Quaternion, snapshot: ShipVisualSnapshot): void {
+    const now = performance.now()
+    if (now - this.lastLightingSampleAt >= 200) {
+      this.lastLightingSampleAt = now
+      this.sunlightFactor = computeOrbitalLighting(this.viewer.clock.currentTime, position).sunlight
+      const shadow = 1 - this.sunlightFactor
+      this.modelColor.setValue(new Color(
+        0.42 + this.sunlightFactor * 0.58,
+        0.56 + this.sunlightFactor * 0.44,
+        0.72 + this.sunlightFactor * 0.28,
+        1,
+      ))
+      this.modelBlendAmount.setValue(shadow * 0.58)
+    }
+
     const rotation = Matrix3.fromQuaternion(orientation, new Matrix3())
     const shipMatrix = Matrix4.fromRotationTranslation(rotation, position, new Matrix4())
     for (const component of this.components) Matrix4.multiply(shipMatrix, component.localMatrix, component.primitive.modelMatrix)
@@ -132,9 +156,12 @@ export class ShipVisual {
 
     const enginePositions = ENGINE_OFFSETS.map((offset) => Matrix4.multiplyByPoint(shipMatrix, offset, new Cartesian3()))
     const forward = getShipBasis(orientation).forward
+    const eclipseBoost = 1 - this.sunlightFactor
     const trailLength = 1_800 + Math.abs(snapshot.throttle) * 5_500 + (snapshot.boost ? 6_000 : 0)
-    const engineSize = 14 + Math.abs(snapshot.throttle) * 20 + (snapshot.boost ? 18 : 0)
-    const engineColor = snapshot.boost ? Color.fromCssColorString('#c9f7ff') : Color.fromCssColorString('#5edcff')
+    const engineSize = 14 + Math.abs(snapshot.throttle) * 20 + (snapshot.boost ? 18 : 0) + eclipseBoost * 5
+    const engineColor = snapshot.boost
+      ? Color.fromCssColorString('#d8fbff')
+      : Color.fromCssColorString(eclipseBoost > 0.5 ? '#79e8ff' : '#5edcff')
     for (let i = 0; i < this.enginePrimitives.length; i += 1) {
       const engine = this.enginePrimitives[i]
       engine.position = enginePositions[i]
@@ -143,7 +170,10 @@ export class ShipVisual {
       this.trails[i].positions = [enginePositions[i], Cartesian3.subtract(enginePositions[i], Cartesian3.multiplyByScalar(forward, trailLength, new Cartesian3()), new Cartesian3())]
       this.trails[i].width = 2 + Math.abs(snapshot.throttle) * 4 + (snapshot.boost ? 3 : 0)
     }
-    for (const material of this.trailMaterials) material.uniforms.color = engineColor.withAlpha(snapshot.boost ? 0.85 : 0.45)
+    for (const material of this.trailMaterials) {
+      const alpha = snapshot.boost ? 0.85 : 0.45 + eclipseBoost * 0.18
+      material.uniforms.color = engineColor.withAlpha(alpha)
+    }
   }
 
   setVisible(visible: boolean): void {
