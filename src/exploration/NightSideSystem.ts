@@ -1,6 +1,7 @@
 import {
   Cartesian2,
   Cartesian3,
+  Cartographic,
   Ellipsoid,
   ImageryLayer,
   Viewer,
@@ -33,6 +34,15 @@ type TunableLayer = ImageryLayer & {
   imageryProvider: unknown
 }
 
+type PrefetchProvider = {
+  requestImage: (x: number, y: number, level: number) => Promise<unknown> | unknown | undefined
+  tilingScheme: {
+    positionToTileXY: (position: Cartographic, level: number, result?: Cartesian2) => Cartesian2 | undefined
+    getNumberOfXTilesAtLevel: (level: number) => number
+    getNumberOfYTilesAtLevel: (level: number) => number
+  }
+}
+
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
 }
@@ -42,10 +52,18 @@ function smoothstep01(value: number): number {
   return clamped * clamped * (3 - 2 * clamped)
 }
 
+export function imageryPrefetchLevel(cameraHeightMeters: number): number {
+  if (cameraHeightMeters > 1_500_000) return 3
+  if (cameraHeightMeters > 650_000) return 4
+  if (cameraHeightMeters > 300_000) return 5
+  if (cameraHeightMeters > 140_000) return 6
+  return 7
+}
+
 /**
  * Converts direct sunlight at the center of the current Earth view into a
- * night-light grade. Daylight is now truly transparent instead of leaving a
- * low-alpha tiled overlay that can reveal provider placeholders while loading.
+ * night-light grade. Daylight is truly transparent so an overlay can never
+ * reveal a provider placeholder over the lit hemisphere.
  */
 export function nightLightsVisual(sunlight: number): NightLightsVisual {
   const darkness = smoothstep01((0.68 - clamp(sunlight, 0, 1)) / 0.68)
@@ -74,10 +92,10 @@ function isNasaNightLightsLayer(layer: TunableLayer): boolean {
 }
 
 /**
- * Explore-only presentation controller for the existing NASA VIIRS night-light
- * imagery layer. The overlay is kept nearly invisible while Cesium still has
- * terrain/imagery requests in flight, which prevents bright rectangular tile
- * placeholders from flashing over the surface during fast low-orbit motion.
+ * Explore-only presentation controller for NASA VIIRS plus a tiny forward
+ * imagery prefetcher. The prefetcher asks the active base provider for a 3x3
+ * neighborhood near the camera's forward ground intersection. Browser/provider
+ * caches then satisfy Cesium when that region enters the visible frustum.
  */
 export class NightSideSystem {
   private readonly viewer: Viewer
@@ -85,8 +103,11 @@ export class NightSideSystem {
   private snapshot: NightLayerSnapshot | null = null
   private running = false
   private lastSearchAt = -Infinity
+  private lastPrefetchAt = -Infinity
   private stableFrames = 0
   private readonly screenCenter = new Cartesian2()
+  private readonly prefetchPoint = new Cartesian2()
+  private readonly tileCoordinate = new Cartesian2()
 
   constructor(viewer: Viewer) {
     this.viewer = viewer
@@ -96,12 +117,14 @@ export class NightSideSystem {
     if (this.running || this.viewer.isDestroyed()) return
     this.running = true
     this.stableFrames = 0
+    this.lastPrefetchAt = -Infinity
     this.resolveLayer(performance.now(), true)
   }
 
   update(shipPosition: Cartesian3, now = performance.now()): void {
     if (!this.running || this.viewer.isDestroyed()) return
     this.resolveLayer(now, false)
+    this.prefetchAhead(now)
     if (!this.layer) return
 
     const canvas = this.viewer.scene.canvas
@@ -119,9 +142,6 @@ export class NightSideSystem {
 
     this.layer.show = alpha > 0.015
     this.layer.alpha = alpha
-    // Cesium can blend imagery separately on the lit and dark hemispheres.
-    // Keeping dayAlpha at zero also prevents a night-light tile from flashing
-    // white on the sunlit side before its transparency is fully established.
     this.layer.dayAlpha = 0
     this.layer.nightAlpha = alpha
     this.layer.brightness = visual.brightness
@@ -143,6 +163,48 @@ export class NightSideSystem {
     this.snapshot = null
   }
 
+  private prefetchAhead(now: number): void {
+    if (now - this.lastPrefetchAt < 1_350 || this.viewer.imageryLayers.length === 0) return
+    this.lastPrefetchAt = now
+
+    const baseLayer = this.viewer.imageryLayers.get(0) as ImageryLayer & { imageryProvider: PrefetchProvider }
+    const provider = baseLayer?.imageryProvider
+    if (!provider?.requestImage || !provider?.tilingScheme?.positionToTileXY) return
+
+    const canvas = this.viewer.scene.canvas
+    const width = canvas.clientWidth || canvas.width
+    const height = canvas.clientHeight || canvas.height
+    this.prefetchPoint.x = width * 0.5
+    this.prefetchPoint.y = height * 0.34
+
+    const aheadCartesian = this.viewer.camera.pickEllipsoid(this.prefetchPoint, Ellipsoid.WGS84)
+    const cartographic = aheadCartesian
+      ? Cartographic.fromCartesian(aheadCartesian)
+      : this.viewer.camera.positionCartographic
+    if (!cartographic) return
+
+    const level = imageryPrefetchLevel(Math.max(0, this.viewer.camera.positionCartographic.height))
+    const tile = provider.tilingScheme.positionToTileXY(cartographic, level, this.tileCoordinate)
+    if (!tile) return
+    const columns = provider.tilingScheme.getNumberOfXTilesAtLevel(level)
+    const rows = provider.tilingScheme.getNumberOfYTilesAtLevel(level)
+
+    for (let dy = -1; dy <= 1; dy += 1) {
+      const y = Math.floor(tile.y) + dy
+      if (y < 0 || y >= rows) continue
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const x = ((Math.floor(tile.x) + dx) % columns + columns) % columns
+        try {
+          const request = provider.requestImage(x, y, level)
+          if (request) void Promise.resolve(request).catch(() => undefined)
+        } catch {
+          // RequestScheduler/provider throttling is normal while the camera is
+          // moving quickly. A future pass will try the neighborhood again.
+        }
+      }
+    }
+  }
+
   private resolveLayer(now: number, force: boolean): void {
     if (this.layer || (!force && now - this.lastSearchAt < 2_000)) return
     this.lastSearchAt = now
@@ -161,8 +223,6 @@ export class NightSideSystem {
         saturation: candidate.saturation,
         gamma: candidate.gamma,
       }
-      // Suppress the provider's default presentation immediately. update()
-      // will fade it back only after the current globe view is tile-complete.
       candidate.show = false
       candidate.alpha = 0
       candidate.dayAlpha = 0
