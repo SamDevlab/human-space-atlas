@@ -12,6 +12,7 @@ import { ShipCameraRig } from './ShipCameraRig'
 import { ShipVisual } from './ShipVisual'
 import { ExploreCloudSystem } from './ExploreCloudSystem'
 import { AuroraSystem } from './AuroraSystem'
+import { NightSideSystem } from './NightSideSystem'
 import { computeOrbitalLighting } from './OrbitalLighting'
 import type { ExplorationCameraMode, ExplorationCameraPreset, ExplorationHudSnapshot, ShipState, TargetIndicatorSnapshot } from './types'
 
@@ -43,6 +44,7 @@ export class ExplorationController {
   private readonly shipVisual: ShipVisual
   private readonly exploreCloudSystem: ExploreCloudSystem
   private readonly auroraSystem: AuroraSystem
+  private readonly nightSideSystem: NightSideSystem
   private state: ShipState | null = null
   private targetPosition: Cartesian3 | null = null
   private targetPositionGoal: Cartesian3 | null = null
@@ -145,6 +147,7 @@ export class ExplorationController {
     this.shipVisual = new ShipVisual(viewer)
     this.exploreCloudSystem = new ExploreCloudSystem(viewer)
     this.auroraSystem = new AuroraSystem(viewer)
+    this.nightSideSystem = new NightSideSystem(viewer)
   }
 
   isActive(): boolean { return this.active }
@@ -181,6 +184,7 @@ export class ExplorationController {
     this.lastLightingUpdate = 0
     this.syncExploreCloudSettings(true)
     this.auroraSystem.start()
+    this.nightSideSystem.start()
     this.updateCinematicLighting(performance.now(), true)
     this.frameHandle = requestAnimationFrame(this.frame)
     this.emitHud(performance.now())
@@ -196,6 +200,7 @@ export class ExplorationController {
     this.exploreCloudSystem.stop()
     this.exploreCloudsRunning = false
     this.auroraSystem.stop()
+    this.nightSideSystem.stop()
     this.resetCinematicLighting()
     this.cameraRig.exit()
     if (this.savedCamera) this.viewer.camera.setView({ destination: this.savedCamera.position, orientation: { direction: this.savedCamera.direction, up: this.savedCamera.up } })
@@ -213,6 +218,7 @@ export class ExplorationController {
 
   destroy(): void {
     this.exit()
+    this.nightSideSystem.destroy()
     this.auroraSystem.destroy()
     this.exploreCloudSystem.destroy()
     this.shipVisual.destroy(this.viewer)
@@ -283,6 +289,7 @@ export class ExplorationController {
   private syncExploreCloudSettings(forceStart: boolean): void {
     if (!this.active) return
     const enabled = localStorage.getItem('human-space-atlas.clouds-enabled') !== '0'
+    const shadowsEnabled = localStorage.getItem('human-space-atlas.cloud-shadows-enabled') !== '0'
     const savedOpacity = Number(localStorage.getItem('human-space-atlas.cloud-opacity-v3'))
     const opacity = Number.isFinite(savedOpacity) ? Math.min(1, Math.max(0, savedOpacity)) : 0.75
 
@@ -294,7 +301,7 @@ export class ExplorationController {
 
     if (!this.exploreCloudsRunning || forceStart) {
       this.exploreCloudsRunning = true
-      void this.exploreCloudSystem.start(opacity).catch((error) => {
+      void this.exploreCloudSystem.start(opacity, shadowsEnabled).catch((error) => {
         this.exploreCloudsRunning = false
         console.warn('[Human Space Atlas] NASA Explore cloud field unavailable', error)
       })
@@ -302,6 +309,7 @@ export class ExplorationController {
     }
 
     this.exploreCloudSystem.setOpacity(opacity)
+    this.exploreCloudSystem.setShadowsEnabled(shadowsEnabled)
   }
 
   private updateCinematicLighting(now: number, force = false): void {
@@ -312,19 +320,23 @@ export class ExplorationController {
     const lighting = computeOrbitalLighting(this.viewer.clock.currentTime, this.state.position)
     const sunlight = Math.max(0, Math.min(1, lighting.sunlight))
     const eclipse = 1 - sunlight
-    const twilight = Math.exp(-Math.pow((sunlight - 0.5) / 0.22, 2))
+    const twilight = Math.exp(-Math.pow((sunlight - 0.5) / 0.2, 2))
 
     const skyAtmosphere = this.viewer.scene.skyAtmosphere
     if (skyAtmosphere) {
-      skyAtmosphere.atmosphereLightIntensity = 72 + twilight * 38 - eclipse * 18
-      skyAtmosphere.brightnessShift = 0.035 + twilight * 0.075 - eclipse * 0.025
-      skyAtmosphere.saturationShift = 0.12 + twilight * 0.14 - eclipse * 0.05
+      skyAtmosphere.atmosphereLightIntensity = 66 + twilight * 58 - eclipse * 22
+      skyAtmosphere.brightnessShift = 0.02 + twilight * 0.12 - eclipse * 0.035
+      skyAtmosphere.saturationShift = 0.1 + twilight * 0.2 - eclipse * 0.06
     }
     const globe = this.viewer.scene.globe
-    globe.atmosphereLightIntensity = 20 + twilight * 9 - eclipse * 4
-    globe.atmosphereBrightnessShift = 0.035 + twilight * 0.045
-    globe.atmosphereSaturationShift = 0.12 + twilight * 0.08
-    if (this.viewer.scene.sun) this.viewer.scene.sun.glowFactor = 1.35 + twilight * 1.1
+    globe.atmosphereLightIntensity = 18 + twilight * 14 - eclipse * 5
+    globe.atmosphereBrightnessShift = 0.025 + twilight * 0.075 - eclipse * 0.01
+    globe.atmosphereSaturationShift = 0.1 + twilight * 0.12 - eclipse * 0.035
+    globe.lambertDiffuseMultiplier = 1.08 - eclipse * 0.22 + twilight * 0.08
+    if (this.viewer.scene.sun) this.viewer.scene.sun.glowFactor = 1.25 + twilight * 2.1
+    if (this.viewer.shadowMap) this.viewer.shadowMap.darkness = 0.28 + eclipse * 0.18
+
+    this.nightSideSystem.update(this.state.position, now)
     this.viewer.scene.requestRender()
   }
 
@@ -340,7 +352,9 @@ export class ExplorationController {
     globe.atmosphereLightIntensity = 20
     globe.atmosphereBrightnessShift = 0.035
     globe.atmosphereSaturationShift = 0.12
+    globe.lambertDiffuseMultiplier = 1.12
     if (this.viewer.scene.sun) this.viewer.scene.sun.glowFactor = 1.35
+    if (this.viewer.shadowMap) this.viewer.shadowMap.darkness = 0.3
   }
 
   private syncToTarget(now: number): void {
