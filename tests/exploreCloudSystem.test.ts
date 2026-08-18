@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  cloudShadowOffsetMeters,
+  cloudShadowOpacity,
   createExploreCloudSeeds,
   exploreCloudMapFade,
   exploreCloudRadiusDegrees,
@@ -76,5 +78,22 @@ describe('ExploreCloudSystem helpers', () => {
     expect(thick[0].depthMeters).toBeGreaterThan(thin[0].depthMeters)
     expect(thick[0].alpha).toBeGreaterThan(thin[0].alpha)
     expect(thick[0].altitudeMeters + thick[0].depthMeters * 0.5).toBeCloseTo(11_000, -1)
+  })
+
+  it('keeps cloud shadows subtle, density-aware and daylight-only', () => {
+    expect(cloudShadowOpacity(0.8, 1, 1, 1)).toBeGreaterThan(cloudShadowOpacity(0.25, 1, 1, 1))
+    expect(cloudShadowOpacity(0.8, 0, 1, 1)).toBeCloseTo(0)
+    expect(cloudShadowOpacity(0.8, 1, 0.5, 1)).toBeLessThan(cloudShadowOpacity(0.8, 1, 1, 1))
+    expect(cloudShadowOpacity(1, 1, 1, 1)).toBeLessThan(0.12)
+  })
+
+  it('projects longer cloud shadows as the sun approaches the horizon', () => {
+    const overhead = cloudShadowOffsetMeters(10_000, 1)
+    const midSun = cloudShadowOffsetMeters(10_000, 0.5)
+    const horizon = cloudShadowOffsetMeters(10_000, 0.06)
+    expect(overhead).toBeCloseTo(0)
+    expect(midSun).toBeGreaterThan(overhead)
+    expect(horizon).toBeGreaterThan(midSun)
+    expect(horizon).toBeLessThanOrEqual(180_000)
   })
 })
