@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { nightLightsVisual } from '../src/exploration/NightSideSystem'
+import { imageryPrefetchLevel, nightLightsVisual } from '../src/exploration/NightSideSystem'
 
 describe('NightSideSystem helpers', () => {
-  it('keeps VIIRS city lights fully hidden in full sunlight', () => {
+  it('keeps VIIRS city lights fully invisible in full sunlight', () => {
     const day = nightLightsVisual(1)
     expect(day.alpha).toBe(0)
     expect(day.brightness).toBeLessThan(1.2)
@@ -23,5 +23,13 @@ describe('NightSideSystem helpers', () => {
     expect(darkerThanDark.alpha).toBeGreaterThan(0)
     expect(darkerThanDark.alpha).toBeLessThanOrEqual(1)
     expect(brighterThanDay.alpha).toBe(0)
+  })
+
+  it('prefetches progressively deeper texture levels as Explore approaches Earth', () => {
+    expect(imageryPrefetchLevel(2_000_000)).toBe(3)
+    expect(imageryPrefetchLevel(800_000)).toBe(4)
+    expect(imageryPrefetchLevel(440_000)).toBe(5)
+    expect(imageryPrefetchLevel(180_000)).toBe(6)
+    expect(imageryPrefetchLevel(100_000)).toBe(7)
   })
 })
