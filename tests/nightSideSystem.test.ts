@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { nightLightsVisual } from '../src/exploration/NightSideSystem'
 
 describe('NightSideSystem helpers', () => {
-  it('keeps VIIRS city lights nearly invisible in full sunlight', () => {
+  it('keeps VIIRS city lights fully hidden in full sunlight', () => {
     const day = nightLightsVisual(1)
-    expect(day.alpha).toBeLessThan(0.05)
+    expect(day.alpha).toBe(0)
     expect(day.brightness).toBeLessThan(1.2)
   })
 
@@ -22,7 +22,6 @@ describe('NightSideSystem helpers', () => {
     const brighterThanDay = nightLightsVisual(4)
     expect(darkerThanDark.alpha).toBeGreaterThan(0)
     expect(darkerThanDark.alpha).toBeLessThanOrEqual(1)
-    expect(brighterThanDay.alpha).toBeGreaterThan(0)
-    expect(brighterThanDay.alpha).toBeLessThan(0.05)
+    expect(brighterThanDay.alpha).toBe(0)
   })
 })
