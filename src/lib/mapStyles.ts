@@ -18,30 +18,62 @@ const USABLE_CESIUM_NAMES = new Set([
   'Natural Earth\u00a0II',
 ])
 
+const WARMUP_REQUEST_BUDGET = 28
+const providerPromiseCache = new Map<string, Promise<ImageryProvider | ImageryProvider[]>>()
 const stableId = (name: string) => name.toLowerCase().replace(/[\u00ad\u00a0]/g, ' ').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 
 /**
- * Preload the two coarsest imagery levels before a provider is handed to the
- * globe. Cesium can then keep a complete low-resolution ancestor underneath
- * finer requests instead of exposing temporary tile-sized gaps while the
- * camera is moving or a map style is being replaced.
+ * Keep warm-up conservative on limited devices/data-saver connections, while
+ * desktop machines can afford one extra ancestor level before a style swap.
  */
-async function warmImageryProvider(provider: ImageryProvider): Promise<ImageryProvider> {
+export function imageryWarmupMaxLevel(): number {
+  if (typeof navigator === 'undefined') return 1
+  const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection
+  if (connection?.saveData || connection?.effectiveType === '2g' || connection?.effectiveType === 'slow-2g') return 0
+  const deviceMemory = Number((navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4)
+  const cores = Number(navigator.hardwareConcurrency ?? 4)
+  return deviceMemory >= 8 && cores >= 8 ? 2 : 1
+}
+
+/**
+ * Preload coarse imagery ancestors before a provider is handed to the globe.
+ * This gives Cesium complete low-resolution coverage to display while the
+ * visible high-resolution descendants stream in, preventing tile-sized holes.
+ */
+export async function warmImageryProvider(provider: ImageryProvider, maxLevel = imageryWarmupMaxLevel()): Promise<ImageryProvider> {
   const tasks: Promise<unknown>[] = []
   const tilingScheme = provider.tilingScheme
+  let budget = WARMUP_REQUEST_BUDGET
 
-  for (let level = 0; level <= 1; level += 1) {
+  for (let level = 0; level <= maxLevel && budget > 0; level += 1) {
     const columns = tilingScheme.getNumberOfXTilesAtLevel(level)
     const rows = tilingScheme.getNumberOfYTilesAtLevel(level)
-    for (let x = 0; x < columns; x += 1) {
-      for (let y = 0; y < rows; y += 1) {
-        try {
-          const request = provider.requestImage(x, y, level)
-          if (request) tasks.push(Promise.resolve(request).catch(() => undefined))
-        } catch {
-          // A provider can throttle individual requests. Cesium will retry the
-          // tile normally after the layer is attached to the globe.
+    const centerX = Math.floor(columns / 2)
+    const centerY = Math.floor(rows / 2)
+    const coordinates: Array<[number, number]> = []
+
+    // At the first two levels the whole planet is cheap enough to seed. At a
+    // deeper level, stay within the fixed request budget around each quadrant.
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < columns; x += 1) coordinates.push([x, y])
+    }
+    coordinates.sort((left, right) => {
+      const leftDistance = Math.abs(left[0] - centerX) + Math.abs(left[1] - centerY)
+      const rightDistance = Math.abs(right[0] - centerX) + Math.abs(right[1] - centerY)
+      return leftDistance - rightDistance
+    })
+
+    for (const [x, y] of coordinates) {
+      if (budget <= 0) break
+      try {
+        const request = provider.requestImage(x, y, level)
+        if (request) {
+          tasks.push(Promise.resolve(request).catch(() => undefined))
+          budget -= 1
         }
+      } catch {
+        // Provider throttling is expected under load; Cesium will request the
+        // tile again after the layer is attached.
       }
     }
   }
@@ -61,10 +93,23 @@ async function warmCreatedProviders(
   return warmImageryProvider(resolved)
 }
 
-function warmedCreation(
+function cachedWarmedCreation(
+  id: string,
   command: (() => ImageryProvider | ImageryProvider[] | Promise<ImageryProvider | ImageryProvider[]>) | undefined,
 ): (() => Promise<ImageryProvider | ImageryProvider[]>) | undefined {
-  return command ? () => warmCreatedProviders(command()) : undefined
+  if (!command) return undefined
+  return () => {
+    const existing = providerPromiseCache.get(id)
+    if (existing) return existing
+    const pending = warmCreatedProviders(command())
+    providerPromiseCache.set(id, pending)
+    pending.catch(() => providerPromiseCache.delete(id))
+    return pending
+  }
+}
+
+export function clearImageryProviderCacheForTests(): void {
+  providerPromiseCache.clear()
 }
 
 export function discoverMapStyles(): MapStyleDefinition[] {
@@ -74,16 +119,17 @@ export function discoverMapStyles(): MapStyleDefinition[] {
   const satelliteModel = models.find((model) => model.name === 'ArcGIS World Imagery')
   const satelliteCommand = satelliteModel?.creationCommand as unknown as (() => ImageryProvider | ImageryProvider[] | Promise<ImageryProvider | ImageryProvider[]>) | undefined
   return [
-    { id: 'satellite', name: 'Satellite', tooltip: 'Human Space Atlas default satellite imagery', isDefault: true, create: warmedCreation(satelliteCommand) },
+    { id: 'satellite', name: 'Satellite', tooltip: 'Human Space Atlas default satellite imagery', isDefault: true, create: cachedWarmedCreation('satellite', satelliteCommand) },
     ...models.filter((model) => USABLE_CESIUM_NAMES.has(model.name)).map((model) => {
+      const id = stableId(model.name)
       const command = model.creationCommand as unknown as () => ImageryProvider | ImageryProvider[] | Promise<ImageryProvider | ImageryProvider[]>
       return {
-        id: stableId(model.name),
+        id,
         name: model.name.replace(/[\u00ad\u00a0]/g, ' '),
         tooltip: model.tooltip,
         iconUrl: model.iconUrl,
         isDefault: false,
-        create: warmedCreation(command),
+        create: cachedWarmedCreation(id, command),
       }
     }),
   ]
