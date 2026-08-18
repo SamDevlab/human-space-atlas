@@ -10,26 +10,35 @@ import { createAuroraCurtainSeeds, type AuroraForecast } from '../lib/aurora'
 import { computeOrbitalLighting } from './OrbitalLighting'
 
 const REFRESH_MS = 5 * 60 * 1000
-const MAX_CURTAIN_SEEDS = 420
+const MAX_CURTAIN_SEEDS = 280
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
 }
 
+function hash01(x: number, y: number): number {
+  const value = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123
+  return value - Math.floor(value)
+}
+
 function auroraColor(strength: number, darkness: number): Color {
   const blue = Color.fromCssColorString('#62dfff')
   const green = Color.fromCssColorString('#74ffb1')
-  const strong = Color.fromCssColorString('#c6ffd7')
+  const strong = Color.fromCssColorString('#d7ffe2')
   const base = Color.lerp(blue, green, clamp(strength * 1.25, 0, 1), new Color())
   const mixed = strength > 0.78 ? Color.lerp(base, strong, (strength - 0.78) / 0.22, new Color()) : base
-  return mixed.withAlpha(clamp((0.16 + strength * 0.68) * (0.2 + darkness * 0.8), 0.04, 0.88))
+  return mixed.withAlpha(clamp((0.13 + strength * 0.62) * (0.16 + darkness * 0.84), 0.025, 0.82))
+}
+
+function shiftedLongitude(longitude: number, offset: number): number {
+  return ((longitude + offset + 180) % 360 + 360) % 360 - 180
 }
 
 /**
  * NOAA OVATION supplies the geospatial auroral oval. This renderer turns that
- * field into vertical, glowing curtains while preserving the forecast shape.
- * The curtain geometry is intentionally cinematic; NOAA does not provide a 3D
- * volume for the emitted light.
+ * field into several separated filaments per seed so the sheet has real depth
+ * and parallax from orbit. NOAA still defines the macro footprint/strength;
+ * the vertical layering is a cinematic reconstruction, not measured 3D data.
  */
 export class AuroraSystem {
   private readonly viewer: Viewer
@@ -92,38 +101,59 @@ export class AuroraSystem {
     this.curtains.removeAll()
 
     for (const seed of seeds) {
-      const bottom = Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.bottomMeters)
-      const middle = Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.bottomMeters + (seed.topMeters - seed.bottomMeters) * 0.52)
-      const top = Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.topMeters)
-      const sunlight = computeOrbitalLighting(this.viewer.clock.currentTime, bottom).sunlight
+      const keyX = Math.round(seed.longitudeDeg * 10)
+      const keyY = Math.round(seed.latitudeDeg * 10)
+      const sunlightProbe = Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.bottomMeters)
+      const sunlight = computeOrbitalLighting(this.viewer.clock.currentTime, sunlightProbe).sunlight
       const darkness = 1 - sunlight
       const color = auroraColor(seed.strength, darkness)
+      const hemisphere = seed.latitudeDeg >= 0 ? 1 : -1
+      const sway = (hash01(keyX + 17, keyY + 31) - 0.5) * 0.34
+      const verticalSpan = Math.max(20_000, seed.topMeters - seed.bottomMeters)
 
-      this.curtains.add({
-        positions: [bottom, middle, top],
-        width: seed.width,
-        material: Material.fromType('PolylineGlow', {
-          color,
-          glowPower: 0.28 + seed.strength * 0.24,
-          taperPower: 0.7,
-        }),
-        show: true,
-      })
+      const filamentOffsets = [
+        { lon: -seed.spanDegrees * 0.26, lat: -0.08 * hemisphere, base: 0.04, top: -0.08, alpha: 0.38, width: 0.58 },
+        { lon: 0, lat: 0, base: 0, top: 0.04, alpha: 1, width: 1 },
+        { lon: seed.spanDegrees * 0.24, lat: 0.09 * hemisphere, base: 0.08, top: 0.12, alpha: 0.48, width: 0.66 },
+      ] as const
 
-      // A shallow ribbon joins nearby curtain filaments visually. It is not a
-      // second data product; it is a cinematic reconstruction around the NOAA
-      // grid anchor that makes the oval read as a continuous auroral sheet.
-      const ribbonLatitude = seed.latitudeDeg + (seed.latitudeDeg >= 0 ? 0.12 : -0.12)
-      const left = Cartesian3.fromDegrees(seed.longitudeDeg - seed.spanDegrees, ribbonLatitude, seed.bottomMeters + 18_000)
-      const center = Cartesian3.fromDegrees(seed.longitudeDeg, ribbonLatitude, seed.bottomMeters + 26_000 + seed.strength * 34_000)
-      const right = Cartesian3.fromDegrees(seed.longitudeDeg + seed.spanDegrees, ribbonLatitude, seed.bottomMeters + 18_000)
+      for (const [index, filament] of filamentOffsets.entries()) {
+        const longitude = shiftedLongitude(seed.longitudeDeg, filament.lon + sway * (index - 1))
+        const latitude = clamp(seed.latitudeDeg + filament.lat, -89.5, 89.5)
+        const bottomMeters = seed.bottomMeters + verticalSpan * filament.base
+        const topMeters = seed.topMeters + verticalSpan * filament.top
+        const middleMeters = bottomMeters + (topMeters - bottomMeters) * (0.46 + index * 0.04)
+        const lateral = seed.spanDegrees * (0.12 + index * 0.025)
+        const bottom = Cartesian3.fromDegrees(longitude - lateral * 0.12, latitude, bottomMeters)
+        const middle = Cartesian3.fromDegrees(longitude + sway * 0.16, latitude + hemisphere * 0.035, middleMeters)
+        const top = Cartesian3.fromDegrees(longitude + lateral * 0.16, latitude, topMeters)
+        const filamentColor = color.withAlpha(clamp(color.alpha * filament.alpha, 0.018, 0.82))
+
+        this.curtains.add({
+          positions: [bottom, middle, top],
+          width: Math.max(1, seed.width * filament.width),
+          material: Material.fromType('PolylineGlow', {
+            color: filamentColor,
+            glowPower: 0.28 + seed.strength * 0.22 + index * 0.035,
+            taperPower: 0.78 + index * 0.08,
+          }),
+          show: true,
+        })
+      }
+
+      // A dim connective ribbon makes neighboring NOAA anchors read as one
+      // continuous oval without turning the effect into an opaque wall.
+      const ribbonLatitude = seed.latitudeDeg + hemisphere * 0.12
+      const left = Cartesian3.fromDegrees(shiftedLongitude(seed.longitudeDeg, -seed.spanDegrees), ribbonLatitude, seed.bottomMeters + 16_000)
+      const center = Cartesian3.fromDegrees(seed.longitudeDeg, ribbonLatitude + hemisphere * 0.035, seed.bottomMeters + 24_000 + seed.strength * 30_000)
+      const right = Cartesian3.fromDegrees(shiftedLongitude(seed.longitudeDeg, seed.spanDegrees), ribbonLatitude, seed.bottomMeters + 17_000)
       this.curtains.add({
         positions: [left, center, right],
-        width: Math.max(1, seed.width * 0.72),
+        width: Math.max(1, seed.width * 0.58),
         material: Material.fromType('PolylineGlow', {
-          color: color.withAlpha(color.alpha * 0.58),
-          glowPower: 0.4,
-          taperPower: 0.9,
+          color: color.withAlpha(color.alpha * 0.36),
+          glowPower: 0.34,
+          taperPower: 0.96,
         }),
         show: true,
       })
