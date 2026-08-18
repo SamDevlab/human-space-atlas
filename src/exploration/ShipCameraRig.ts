@@ -8,8 +8,8 @@ export const MAX_CAMERA_DISTANCE_METERS = 50_000
 export const MIN_CAMERA_PITCH = -Math.PI * 0.47
 export const MAX_CAMERA_PITCH = Math.PI * 0.47
 export const DEFAULT_CAMERA_PITCH = 0.18
-export const INITIAL_EARTH_FOCUS_SECONDS = 3.2
-export const INITIAL_EARTH_FOCUS_BLEND_SECONDS = 1.35
+export const INITIAL_EARTH_FOCUS_SECONDS = 3.8
+export const INITIAL_EARTH_FOCUS_BLEND_SECONDS = 1.5
 
 export interface CameraOrbitState {
   yaw: number
@@ -54,8 +54,6 @@ function stableCameraUp(direction: Cartesian3, rollUp: Cartesian3, fallback: Car
   Cartesian3.multiplyByScalar(direction, Cartesian3.dot(rollUp, direction), projectedUp)
   Cartesian3.subtract(rollUp, projectedUp, projectedUp)
   const up = normalizeOrFallback(projectedUp, fallback, result)
-  // Keep the same hemisphere as the previous frame. Without this guard, a
-  // near-antiparallel lerp can briefly pass through zero and flip the camera.
   return Cartesian3.dot(up, fallback) >= 0 ? up : Cartesian3.negate(up, up)
 }
 
@@ -79,9 +77,6 @@ export class ShipCameraRig {
   private latestForward = Cartesian3.UNIT_X.clone()
   private latestRight = Cartesian3.UNIT_Y.clone()
   private latestUp = Cartesian3.UNIT_Z.clone()
-  // Reuse the camera math buffers every render frame. Explore owns the camera
-  // loop, so allocating a dozen Cartesian3/Matrix3 objects per frame made
-  // garbage collection visible as tiny camera hitches on slower GPUs.
   private readonly targetFrame = new Matrix3()
   private readonly orbitOffset = new Cartesian3()
   private readonly orbitForward = new Cartesian3()
@@ -106,14 +101,8 @@ export class ShipCameraRig {
 
   readonly state: CameraOrbitState = { yaw: 0, pitch: DEFAULT_CAMERA_PITCH, distance: DEFAULT_CAMERA_DISTANCE_METERS }
   followStrength = 3.6
-  // The followed object's attitude can make tiny corrections every frame. The
-  // camera follows a slower orientation envelope so those corrections remain invisible.
   orientationFollowStrength = 2.2
-  // Keep the tracked orbital point in the cinematic frame while still giving
-  // the flight path a small amount of forward bias at orbital velocity.
   lookAhead = 420
-  // Keep the orbital horizon steady; target roll should not unexpectedly
-  // roll the entire camera view with it.
   rollInfluence = 0.1
   orbitSensitivity = 0.004
 
@@ -251,9 +240,6 @@ export class ShipCameraRig {
     const right = this.cameraDetached ? this.referenceRight : followedBasis.right
     const shipUp = this.cameraDetached ? this.referenceUp : followedBasis.up
 
-    // Automatic camera motion is intentionally tiny and very slow. It creates
-    // a living orbital shot while the user is hands-off, then yields immediately
-    // to manual orbit/zoom and stays out of the way until the view is recentered.
     const cinematicYaw = cinematicActive ? Math.sin(this.cinematicPhase * 0.11) * 0.16 : 0
     const cinematicPitch = cinematicActive ? Math.sin(this.cinematicPhase * 0.071 + 1.7) * 0.025 : 0
     const cinematicDistanceScale = cinematicActive ? 1 + Math.sin(this.cinematicPhase * 0.053 + 0.8) * 0.028 : 1
@@ -289,13 +275,13 @@ export class ShipCameraRig {
     const desiredLookTarget = this.desiredLookTarget
     const earthFocusWeight = this.cameraDetached ? 0 : initialEarthFocusWeight(this.earthFocusSeconds)
     if (earthFocusWeight > 0) {
-      // Enter Explore with the planet occupying the visual center instead of
-      // starting on a nearly tangent orbital view. Aim roughly 40 degrees
-      // below the velocity horizon so Earth dominates the frame but the limb
-      // and surrounding space remain visible. The final 1.35 s blends back to
-      // the normal tracked-object framing instead of snapping away.
-      Cartesian3.multiplyByScalar(forward, 0.76, this.earthwardForward)
-      Cartesian3.multiplyByScalar(earthUp, -0.65, this.earthwardDown)
+      // Initial Explore composition is intentionally not a full nadir shot.
+      // Aim about 29 degrees below the local horizon: at ordinary LEO heights
+      // the Earth fills roughly 70% of the frame while about 30% remains open
+      // space/limb. This is baked into entry framing rather than exposed as a
+      // setting, then blends smoothly back to normal tracked-object framing.
+      Cartesian3.multiplyByScalar(forward, 0.88, this.earthwardForward)
+      Cartesian3.multiplyByScalar(earthUp, -0.48, this.earthwardDown)
       Cartesian3.add(this.earthwardForward, this.earthwardDown, this.earthwardDirection)
       normalizeOrFallback(this.earthwardDirection, Cartesian3.negate(earthUp, this.earthwardDown), this.earthwardDirection)
       Cartesian3.multiplyByScalar(this.earthwardDirection, 120_000, this.lookAheadOffset)
