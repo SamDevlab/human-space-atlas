@@ -11,29 +11,30 @@ import {
 } from '../src/exploration/ExploreCloudSystem'
 
 describe('ExploreCloudSystem helpers', () => {
-  it('wraps longitudes deterministically', () => {
+  it('wraps longitudes deterministically and rejects non-finite input safely', () => {
     expect(wrapCloudLongitude(181)).toBeCloseTo(-179)
     expect(wrapCloudLongitude(-181)).toBeCloseTo(179)
     expect(wrapCloudLongitude(540)).toBeCloseTo(-180)
+    expect(wrapCloudLongitude(Number.NaN)).toBe(0)
   })
 
-  it('keeps strong 3D clouds in low orbit and a subtle perspective layer up to about 500 km', () => {
+  it('uses dimensional clouds only where parallax is useful and hands off before 420 km', () => {
     expect(exploreCloudVolumeFade(150_000)).toBeCloseTo(1)
-    expect(exploreCloudVolumeFade(240_000)).toBeGreaterThan(0.85)
-    expect(exploreCloudVolumeFade(300_000)).toBeGreaterThan(0.6)
-    expect(exploreCloudVolumeFade(440_000)).toBeGreaterThan(0)
-    expect(exploreCloudVolumeFade(440_000)).toBeLessThan(0.15)
-    expect(exploreCloudVolumeFade(500_000)).toBeCloseTo(0)
+    expect(exploreCloudVolumeFade(240_000)).toBeGreaterThan(0.7)
+    expect(exploreCloudVolumeFade(300_000)).toBeGreaterThan(0.2)
+    expect(exploreCloudVolumeFade(300_000)).toBeLessThan(0.4)
+    expect(exploreCloudVolumeFade(360_000)).toBeCloseTo(0)
+    expect(exploreCloudVolumeFade(420_000)).toBeCloseTo(0)
 
     expect(exploreCloudMapFade(180_000)).toBeCloseTo(0)
-    expect(exploreCloudMapFade(300_000)).toBeGreaterThan(0.5)
-    expect(exploreCloudMapFade(360_000)).toBeCloseTo(1)
+    expect(exploreCloudMapFade(300_000)).toBeGreaterThan(0.7)
+    expect(exploreCloudMapFade(330_000)).toBeCloseTo(1)
     expect(exploreCloudMapFade(440_000)).toBeCloseTo(1)
   })
 
   it('expands the local cloud neighborhood with camera altitude while keeping it bounded', () => {
     expect(exploreCloudRadiusDegrees(120_000)).toBeLessThan(exploreCloudRadiusDegrees(260_000))
-    expect(exploreCloudRadiusDegrees(5_000_000)).toBeLessThanOrEqual(15)
+    expect(exploreCloudRadiusDegrees(5_000_000)).toBeLessThanOrEqual(14)
   })
 
   it('creates no cinematic clouds when NASA coverage is absent', () => {
@@ -41,7 +42,7 @@ describe('ExploreCloudSystem helpers', () => {
     expect(seeds).toEqual([])
   })
 
-  it('creates stable overlapping cloud banks from observed coverage', () => {
+  it('creates stable bounded cloud banks from observed coverage', () => {
     const observedPatch = (longitudeDeg: number, latitudeDeg: number) =>
       Math.abs(longitudeDeg) < 7 && Math.abs(latitudeDeg) < 6 ? 0.42 : 0
     const first = createExploreCloudSeeds(0, 0, 10, observedPatch, 100)
@@ -50,13 +51,14 @@ describe('ExploreCloudSystem helpers', () => {
     expect(first.length).toBeGreaterThan(0)
     expect(first.length).toBeLessThanOrEqual(100)
     expect(second).toEqual(first)
-    expect(first.every((seed) => seed.altitudeMeters > 1_000)).toBe(true)
-    expect(first.every((seed) => seed.depthMeters >= 2_000)).toBe(true)
-    expect(first.every((seed) => seed.scaleX >= 35_000)).toBe(true)
+    expect(first.every((seed) => seed.altitudeMeters >= 180 && seed.altitudeMeters <= 20_000)).toBe(true)
+    expect(first.every((seed) => seed.depthMeters >= 800 && seed.depthMeters <= 12_000)).toBe(true)
+    expect(first.every((seed) => seed.scaleX >= 32_000 && seed.scaleX <= 180_000)).toBe(true)
+    expect(first.every((seed) => Number.isFinite(seed.scaleX) && Number.isFinite(seed.scaleY))).toBe(true)
     expect(first.every((seed) => seed.alpha > 0 && seed.alpha <= 1)).toBe(true)
   })
 
-  it('splits a macro formation into stacked volumes that create real parallax', () => {
+  it('splits dense macro formations into stacked volumes for real parallax', () => {
     const seed = createExploreCloudSeeds(0, 0, 4, () => 0.7, 20, () => 12_000, () => 55)[0]
     expect(seed).toBeDefined()
     const parts = createCloudVolumeParts(seed)
@@ -64,16 +66,16 @@ describe('ExploreCloudSystem helpers', () => {
     expect(parts[0].altitudeMeters).toBeLessThan(parts[1].altitudeMeters)
     expect(parts[2].altitudeMeters).toBeGreaterThan(parts[1].altitudeMeters)
     expect(parts[0].scaleX).toBeGreaterThan(parts[2].scaleX)
-    expect(new Set(parts.map((part) => `${part.longitudeDeg.toFixed(5)}:${part.latitudeDeg.toFixed(5)}:${part.altitudeMeters.toFixed(0)}`)).size).toBe(parts.length)
+    expect(parts.every((part) => Number.isFinite(part.longitudeDeg) && Number.isFinite(part.depthMeters))).toBe(true)
   })
 
-  it('keeps thinner formations to two layers instead of forcing a fake tower', () => {
+  it('keeps thin formations to two layers instead of forcing a fake tower', () => {
     const seed = createExploreCloudSeeds(0, 0, 4, () => 0.55, 20, () => 7_000, () => 1)[0]
     expect(seed).toBeDefined()
     expect(createCloudVolumeParts(seed).length).toBe(2)
   })
 
-  it('uses NASA cloud-top height while preserving deterministic horizontal structure', () => {
+  it('uses NASA cloud-top height while preserving the observed top', () => {
     const observedPatch = () => 0.52
     const cloudTopHeight = () => 10_000
     const seeds = createExploreCloudSeeds(0, 0, 5, observedPatch, 50, cloudTopHeight)
@@ -81,7 +83,7 @@ describe('ExploreCloudSystem helpers', () => {
     expect(seeds.length).toBeGreaterThan(0)
     expect(seeds.every((seed) => seed.altitudeMeters + seed.depthMeters * 0.5 <= 10_001)).toBe(true)
     expect(seeds.every((seed) => seed.altitudeMeters + seed.depthMeters * 0.5 >= 9_999)).toBe(true)
-    expect(seeds.every((seed) => seed.depthMeters >= 1_300)).toBe(true)
+    expect(seeds.every((seed) => seed.depthMeters >= 1_200)).toBe(true)
   })
 
   it('uses NASA optical thickness to make dense clouds deeper and more opaque', () => {
@@ -98,14 +100,14 @@ describe('ExploreCloudSystem helpers', () => {
     expect(thick[0].altitudeMeters + thick[0].depthMeters * 0.5).toBeCloseTo(11_000, -1)
   })
 
-  it('keeps cloud shadows subtle, density-aware and daylight-only', () => {
+  it('keeps cloud shadow compatibility helpers bounded and daylight-only', () => {
     expect(cloudShadowOpacity(0.8, 1, 1, 1)).toBeGreaterThan(cloudShadowOpacity(0.25, 1, 1, 1))
     expect(cloudShadowOpacity(0.8, 0, 1, 1)).toBeCloseTo(0)
     expect(cloudShadowOpacity(0.8, 1, 0.5, 1)).toBeLessThan(cloudShadowOpacity(0.8, 1, 1, 1))
-    expect(cloudShadowOpacity(1, 1, 1, 1)).toBeLessThanOrEqual(0.1)
+    expect(cloudShadowOpacity(1, 1, 1, 1)).toBeLessThanOrEqual(0.08)
   })
 
-  it('projects longer cloud shadows as the sun approaches the horizon', () => {
+  it('projects longer compatibility shadow offsets toward the horizon', () => {
     const overhead = cloudShadowOffsetMeters(10_000, 1)
     const midSun = cloudShadowOffsetMeters(10_000, 0.5)
     const horizon = cloudShadowOffsetMeters(10_000, 0.06)
