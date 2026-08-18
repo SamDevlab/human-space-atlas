@@ -5,6 +5,7 @@ const PORT = Number(process.env.PORT ?? 8787)
 const CACHE_TTL_MS = 2 * 60 * 60 * 1000
 const EVENT_CACHE_TTL_MS = 15 * 60 * 1000
 const AIRCRAFT_CACHE_TTL_MS = 15 * 1000
+const AURORA_CACHE_TTL_MS = 5 * 60 * 1000
 const CATALOG_GROUPS = new Set(['stations', 'active', 'starlink', 'gps-ops'])
 const EONET_STATUSES = new Set(['open', 'closed', 'all'])
 const cache = new Map()
@@ -116,6 +117,51 @@ async function handleEarthEvents(url, res) {
   })
 }
 
+function normalizeAuroraForecast(payload) {
+  const coordinates = Array.isArray(payload?.coordinates) ? payload.coordinates : []
+  const points = []
+  let peak = 0
+
+  for (const coordinate of coordinates) {
+    if (!Array.isArray(coordinate) || coordinate.length < 3) continue
+    const rawLongitude = Number(coordinate[0])
+    const latitudeDeg = Number(coordinate[1])
+    const intensity = Number(coordinate[2])
+    if (!Number.isFinite(rawLongitude) || !Number.isFinite(latitudeDeg) || !Number.isFinite(intensity)) continue
+    if (Math.abs(latitudeDeg) < 45 || intensity <= 0) continue
+
+    // NOAA OVATION is a one-degree global grid. A two-degree server-side
+    // thinning keeps the browser payload compact while retaining the shape of
+    // both auroral ovals for cinematic rendering.
+    const integerLongitude = Math.round(rawLongitude)
+    const integerLatitude = Math.round(latitudeDeg)
+    if (Math.abs(integerLongitude) % 2 !== 0 || Math.abs(integerLatitude) % 2 !== 0) continue
+
+    const longitudeDeg = rawLongitude > 180 ? rawLongitude - 360 : rawLongitude
+    peak = Math.max(peak, intensity)
+    points.push([longitudeDeg, latitudeDeg, intensity])
+  }
+
+  return {
+    observationTime: typeof payload?.['Observation Time'] === 'string' ? payload['Observation Time'] : null,
+    forecastTime: typeof payload?.['Forecast Time'] === 'string' ? payload['Forecast Time'] : null,
+    dataFormat: typeof payload?.['Data Format'] === 'string' ? payload['Data Format'] : null,
+    peak,
+    points,
+  }
+}
+
+async function handleAuroraForecast(_url, res) {
+  const upstream = 'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json'
+  const result = await fetchWithCache('noaa:ovation:latest', upstream, AURORA_CACHE_TTL_MS)
+  return json(res, 200, {
+    source: 'noaa-swpc-ovation',
+    fetchedAt: result.fetchedAt,
+    cache: result.cache,
+    ...normalizeAuroraForecast(result.value),
+  })
+}
+
 function normalizeAircraftStates(payload, limit) {
   const states = Array.isArray(payload?.states) ? payload.states : []
   return states
@@ -178,6 +224,7 @@ export function createApp() {
     if (req.method === 'GET' && url.pathname === '/api/catalog') return await handleCatalog(url, res)
     if (req.method === 'GET' && url.pathname === '/api/horizons') return await handleHorizons(url, res)
     if (req.method === 'GET' && url.pathname === '/api/earth/events') return await handleEarthEvents(url, res)
+    if (req.method === 'GET' && url.pathname === '/api/space-weather/aurora') return await handleAuroraForecast(url, res)
     if (req.method === 'GET' && url.pathname === '/api/aircraft/states') return await handleAircraftStates(url, res)
     return json(res, 404, { error: 'Not found' })
   } catch (error) {
