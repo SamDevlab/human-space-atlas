@@ -11,6 +11,8 @@ import { createShipState, formatDistanceKm, getShipBasis, LOW_ALTITUDE_WARNING_M
 import { ShipCameraRig } from './ShipCameraRig'
 import { ShipVisual } from './ShipVisual'
 import { ExploreCloudSystem } from './ExploreCloudSystem'
+import { AuroraSystem } from './AuroraSystem'
+import { computeOrbitalLighting } from './OrbitalLighting'
 import type { ExplorationCameraMode, ExplorationCameraPreset, ExplorationHudSnapshot, ShipState, TargetIndicatorSnapshot } from './types'
 
 interface ControllerOptions {
@@ -31,6 +33,7 @@ const PRESENTATION_POSITION_FOLLOW = 16
 const PRESENTATION_ORIENTATION_FOLLOW = 12
 const TARGET_SAMPLE_MAX_AGE_SECONDS = 0.75
 const CLOUD_SETTINGS_POLL_MS = 750
+const CINEMATIC_LIGHTING_POLL_MS = 120
 
 export class ExplorationController {
   private readonly viewer: Viewer
@@ -39,6 +42,7 @@ export class ExplorationController {
   private readonly cameraRig: ShipCameraRig
   private readonly shipVisual: ShipVisual
   private readonly exploreCloudSystem: ExploreCloudSystem
+  private readonly auroraSystem: AuroraSystem
   private state: ShipState | null = null
   private targetPosition: Cartesian3 | null = null
   private targetPositionGoal: Cartesian3 | null = null
@@ -57,6 +61,7 @@ export class ExplorationController {
   private targetSampleAt = 0
   private exploreCloudsRunning = false
   private lastCloudSettingsCheck = 0
+  private lastLightingUpdate = 0
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     if (!this.active) return
@@ -139,6 +144,7 @@ export class ExplorationController {
     this.cameraRig = new ShipCameraRig(viewer)
     this.shipVisual = new ShipVisual(viewer)
     this.exploreCloudSystem = new ExploreCloudSystem(viewer)
+    this.auroraSystem = new AuroraSystem(viewer)
   }
 
   isActive(): boolean { return this.active }
@@ -172,7 +178,10 @@ export class ExplorationController {
     this.lastFrame = performance.now()
     this.lastHud = 0
     this.lastCloudSettingsCheck = 0
+    this.lastLightingUpdate = 0
     this.syncExploreCloudSettings(true)
+    this.auroraSystem.start()
+    this.updateCinematicLighting(performance.now(), true)
     this.frameHandle = requestAnimationFrame(this.frame)
     this.emitHud(performance.now())
   }
@@ -186,6 +195,8 @@ export class ExplorationController {
     this.shipVisual.setVisible(false)
     this.exploreCloudSystem.stop()
     this.exploreCloudsRunning = false
+    this.auroraSystem.stop()
+    this.resetCinematicLighting()
     this.cameraRig.exit()
     if (this.savedCamera) this.viewer.camera.setView({ destination: this.savedCamera.position, orientation: { direction: this.savedCamera.direction, up: this.savedCamera.up } })
     this.viewer.scene.screenSpaceCameraController.enableInputs = this.savedInputs
@@ -202,6 +213,7 @@ export class ExplorationController {
 
   destroy(): void {
     this.exit()
+    this.auroraSystem.destroy()
     this.exploreCloudSystem.destroy()
     this.shipVisual.destroy(this.viewer)
   }
@@ -250,6 +262,7 @@ export class ExplorationController {
       this.lastCloudSettingsCheck = now
       this.syncExploreCloudSettings(false)
     }
+    this.updateCinematicLighting(now)
     const interpolatedPosition = this.state.position
     const interpolatedOrientation = this.state.orientation
     const presentationSmoothing = 1 - Math.exp(-PRESENTATION_POSITION_FOLLOW * Math.max(frameDelta, 1 / 120))
@@ -271,7 +284,7 @@ export class ExplorationController {
     if (!this.active) return
     const enabled = localStorage.getItem('human-space-atlas.clouds-enabled') !== '0'
     const savedOpacity = Number(localStorage.getItem('human-space-atlas.cloud-opacity-v3'))
-    const opacity = Number.isFinite(savedOpacity) ? Math.min(0.7, Math.max(0, savedOpacity)) : 0.5
+    const opacity = Number.isFinite(savedOpacity) ? Math.min(1, Math.max(0, savedOpacity)) : 0.75
 
     if (!enabled) {
       if (this.exploreCloudsRunning) this.exploreCloudSystem.stop()
@@ -289,6 +302,45 @@ export class ExplorationController {
     }
 
     this.exploreCloudSystem.setOpacity(opacity)
+  }
+
+  private updateCinematicLighting(now: number, force = false): void {
+    if (!this.state || this.viewer.isDestroyed()) return
+    if (!force && now - this.lastLightingUpdate < CINEMATIC_LIGHTING_POLL_MS) return
+    this.lastLightingUpdate = now
+
+    const lighting = computeOrbitalLighting(this.viewer.clock.currentTime, this.state.position)
+    const sunlight = Math.max(0, Math.min(1, lighting.sunlight))
+    const eclipse = 1 - sunlight
+    const twilight = Math.exp(-Math.pow((sunlight - 0.5) / 0.22, 2))
+
+    const skyAtmosphere = this.viewer.scene.skyAtmosphere
+    if (skyAtmosphere) {
+      skyAtmosphere.atmosphereLightIntensity = 72 + twilight * 38 - eclipse * 18
+      skyAtmosphere.brightnessShift = 0.035 + twilight * 0.075 - eclipse * 0.025
+      skyAtmosphere.saturationShift = 0.12 + twilight * 0.14 - eclipse * 0.05
+    }
+    const globe = this.viewer.scene.globe
+    globe.atmosphereLightIntensity = 20 + twilight * 9 - eclipse * 4
+    globe.atmosphereBrightnessShift = 0.035 + twilight * 0.045
+    globe.atmosphereSaturationShift = 0.12 + twilight * 0.08
+    if (this.viewer.scene.sun) this.viewer.scene.sun.glowFactor = 1.35 + twilight * 1.1
+    this.viewer.scene.requestRender()
+  }
+
+  private resetCinematicLighting(): void {
+    if (this.viewer.isDestroyed()) return
+    const skyAtmosphere = this.viewer.scene.skyAtmosphere
+    if (skyAtmosphere) {
+      skyAtmosphere.atmosphereLightIntensity = 72
+      skyAtmosphere.brightnessShift = 0.035
+      skyAtmosphere.saturationShift = 0.12
+    }
+    const globe = this.viewer.scene.globe
+    globe.atmosphereLightIntensity = 20
+    globe.atmosphereBrightnessShift = 0.035
+    globe.atmosphereSaturationShift = 0.12
+    if (this.viewer.scene.sun) this.viewer.scene.sun.glowFactor = 1.35
   }
 
   private syncToTarget(now: number): void {
