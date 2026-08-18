@@ -1,5 +1,5 @@
 import * as Cesium from 'cesium'
-import type { ImageryLayer, ImageryProvider, ProviderViewModel } from 'cesium'
+import type { ImageryProvider, ProviderViewModel } from 'cesium'
 
 export interface MapStyleDefinition {
   id: string
@@ -21,129 +21,17 @@ const USABLE_CESIUM_NAMES = new Set([
 const WARMUP_REQUEST_BUDGET = 28
 const providerPromiseCache = new Map<string, Promise<ImageryProvider | ImageryProvider[]>>()
 const stableId = (name: string) => name.toLowerCase().replace(/[\u00ad\u00a0]/g, ' ').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-const transitionMarker = Symbol.for('human-space-atlas.imagery-crossfade-v2')
-
-type TransitionState = {
-  oldLayer: ImageryLayer
-  oldAlpha: number
-  newLayers: ImageryLayer[]
-  insertIndex: number
-  fallbackTimer: number | null
-  frame: number | null
-  startedAt: number | null
-}
-
-type StreamingCollection = Cesium.ImageryLayerCollection & {
-  __hsaBaseTransition?: TransitionState | null
-}
-
-function providerLooksLikeOverlay(layer: ImageryLayer): boolean {
-  const provider = layer.imageryProvider as {
-    layers?: string
-    _layers?: string
-    url?: string
-    _resource?: { url?: string }
-  } | null
-  const layers = String(provider?.layers ?? provider?._layers ?? '').toLowerCase()
-  const url = String(provider?.url ?? provider?._resource?.url ?? '').toLowerCase()
-  return layers.includes('cloud')
-    || layers.includes('daynight')
-    || layers.includes('night_lights')
-    || url.includes('gibs.earthdata.nasa.gov')
-}
-
-/**
- * Legacy Globe code swaps the layer at index 0 synchronously. Intercept only
- * that base-layer remove/add pair and turn it into an actual crossfade. NASA
- * overlays and other higher layers are explicitly excluded from this hook.
- */
-function installBaseLayerCrossfade(): void {
-  if (typeof window === 'undefined' || typeof requestAnimationFrame === 'undefined') return
-  const prototype = Cesium.ImageryLayerCollection.prototype as any
-  if (prototype[transitionMarker]) return
-  prototype[transitionMarker] = true
-
-  const originalRemove = prototype.remove as Cesium.ImageryLayerCollection['remove']
-  const originalAddImageryProvider = prototype.addImageryProvider as Cesium.ImageryLayerCollection['addImageryProvider']
-  const finishTransition = (collection: StreamingCollection) => {
-    const transition = collection.__hsaBaseTransition
-    if (!transition) return
-    if (transition.fallbackTimer !== null) window.clearTimeout(transition.fallbackTimer)
-    if (transition.frame !== null) cancelAnimationFrame(transition.frame)
-    for (const layer of transition.newLayers) layer.alpha = 1
-    if (collection.contains(transition.oldLayer)) originalRemove.call(collection, transition.oldLayer, false)
-    collection.__hsaBaseTransition = null
-  }
-
-  prototype.remove = function removeWithCrossfade(this: StreamingCollection, layer: ImageryLayer, destroy = true): boolean {
-    const index = this.indexOf(layer)
-    const eligible = destroy === false && index === 0 && !providerLooksLikeOverlay(layer)
-    if (!eligible) return originalRemove.call(this, layer, destroy)
-
-    finishTransition(this)
-    const transition: TransitionState = {
-      oldLayer: layer,
-      oldAlpha: layer.alpha,
-      newLayers: [],
-      insertIndex: 0,
-      fallbackTimer: null,
-      frame: null,
-      startedAt: null,
-    }
-    transition.fallbackTimer = window.setTimeout(() => {
-      if (this.__hsaBaseTransition !== transition) return
-      originalRemove.call(this, layer, false)
-      this.__hsaBaseTransition = null
-    }, 500)
-    this.__hsaBaseTransition = transition
-    return true
-  }
-
-  prototype.addImageryProvider = function addWithCrossfade(this: StreamingCollection, provider: ImageryProvider, index?: number): ImageryLayer {
-    const transition = this.__hsaBaseTransition
-    if (!transition || index !== undefined) return originalAddImageryProvider.call(this, provider, index)
-
-    const layer = originalAddImageryProvider.call(this, provider, transition.insertIndex)
-    transition.insertIndex += 1
-    transition.newLayers.push(layer)
-    layer.alpha = 0
-    if (transition.fallbackTimer !== null) {
-      window.clearTimeout(transition.fallbackTimer)
-      transition.fallbackTimer = null
-    }
-
-    if (transition.frame === null) {
-      transition.frame = requestAnimationFrame((startedAt) => {
-        if (this.__hsaBaseTransition !== transition) return
-        transition.startedAt = startedAt
-        const duration = 420
-        const animate = (now: number) => {
-          if (this.__hsaBaseTransition !== transition) return
-          const raw = Math.min(1, Math.max(0, (now - (transition.startedAt ?? now)) / duration))
-          const eased = raw * raw * (3 - 2 * raw)
-          transition.oldLayer.alpha = transition.oldAlpha * (1 - eased)
-          for (const next of transition.newLayers) next.alpha = eased
-          if (raw < 1) {
-            transition.frame = requestAnimationFrame(animate)
-            return
-          }
-          transition.frame = null
-          if (this.contains(transition.oldLayer)) originalRemove.call(this, transition.oldLayer, false)
-          transition.oldLayer.alpha = transition.oldAlpha
-          this.__hsaBaseTransition = null
-        }
-        transition.frame = requestAnimationFrame(animate)
-      })
-    }
-    return layer
-  }
-}
-
-installBaseLayerCrossfade()
 
 /**
  * Keep warm-up conservative on limited devices/data-saver connections, while
  * desktop machines can afford one extra ancestor level before a style swap.
+ *
+ * This module intentionally does not patch Cesium prototypes. A previous
+ * crossfade experiment intercepted ImageryLayerCollection.add/remove globally;
+ * concurrent tile refinement could then observe a collection in a transient
+ * inconsistent state and occasionally stop rendering with an Invalid array
+ * length RangeError. Base-layer swaps are now left to Cesium's own collection
+ * semantics, while warm-up still prevents most visible blank tiles.
  */
 export function imageryWarmupMaxLevel(): number {
   if (typeof navigator === 'undefined') return 1
@@ -156,8 +44,8 @@ export function imageryWarmupMaxLevel(): number {
 
 /**
  * Preload coarse imagery ancestors before a provider is handed to the globe.
- * This gives Cesium complete low-resolution coverage to display while the
- * visible high-resolution descendants stream in, preventing tile-sized holes.
+ * Requests are explicitly bounded to avoid large coordinate arrays or request
+ * bursts on providers with unusual tiling schemes.
  */
 export async function warmImageryProvider(provider: ImageryProvider, maxLevel = imageryWarmupMaxLevel()): Promise<ImageryProvider> {
   const tasks: Promise<unknown>[] = []
@@ -167,12 +55,22 @@ export async function warmImageryProvider(provider: ImageryProvider, maxLevel = 
   for (let level = 0; level <= maxLevel && budget > 0; level += 1) {
     const columns = tilingScheme.getNumberOfXTilesAtLevel(level)
     const rows = tilingScheme.getNumberOfYTilesAtLevel(level)
+    if (!Number.isFinite(columns) || !Number.isFinite(rows) || columns <= 0 || rows <= 0) break
+
     const centerX = Math.floor(columns / 2)
     const centerY = Math.floor(rows / 2)
+    const radius = Math.max(1, Math.ceil(Math.sqrt(WARMUP_REQUEST_BUDGET)))
     const coordinates: Array<[number, number]> = []
-    for (let y = 0; y < rows; y += 1) {
-      for (let x = 0; x < columns; x += 1) coordinates.push([x, y])
+
+    for (let dy = -radius; dy <= radius && coordinates.length < WARMUP_REQUEST_BUDGET * 2; dy += 1) {
+      for (let dx = -radius; dx <= radius && coordinates.length < WARMUP_REQUEST_BUDGET * 2; dx += 1) {
+        const x = centerX + dx
+        const y = centerY + dy
+        if (x < 0 || y < 0 || x >= columns || y >= rows) continue
+        coordinates.push([x, y])
+      }
     }
+
     coordinates.sort((left, right) => {
       const leftDistance = Math.abs(left[0] - centerX) + Math.abs(left[1] - centerY)
       const rightDistance = Math.abs(right[0] - centerX) + Math.abs(right[1] - centerY)
@@ -188,8 +86,8 @@ export async function warmImageryProvider(provider: ImageryProvider, maxLevel = 
           budget -= 1
         }
       } catch {
-        // Provider throttling is expected under load; Cesium will request the
-        // tile again after the layer is attached.
+        // Provider throttling is expected under load; Cesium will retry after
+        // the provider is attached to the globe.
       }
     }
   }
