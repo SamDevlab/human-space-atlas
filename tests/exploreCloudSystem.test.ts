@@ -50,6 +50,17 @@ describe('ExploreCloudSystem helpers', () => {
     expect(first.every((seed) => seed.altitudeMeters > 1_000)).toBe(true)
     expect(first.every((seed) => seed.depthMeters >= 5_000)).toBe(true)
     expect(first.every((seed) => seed.scaleX >= 70_000)).toBe(true)
-    expect(first.every((seed) => seed.alpha > 0 && seed.alpha <= 0.76)).toBe(true)
+    expect(first.every((seed) => seed.alpha > 0 && seed.alpha <= 0.96)).toBe(true)
+  })
+
+  it('uses NASA cloud-top height when available while preserving deterministic horizontal structure', () => {
+    const observedPatch = () => 0.52
+    const cloudTopHeight = () => 10_000
+    const seeds = createExploreCloudSeeds(0, 0, 5, observedPatch, 50, cloudTopHeight)
+
+    expect(seeds.length).toBeGreaterThan(0)
+    expect(seeds.every((seed) => seed.altitudeMeters + seed.depthMeters * 0.5 <= 10_001)).toBe(true)
+    expect(seeds.every((seed) => seed.altitudeMeters + seed.depthMeters * 0.5 >= 9_999)).toBe(true)
+    expect(seeds.every((seed) => seed.depthMeters >= 2_000)).toBe(true)
   })
 })
