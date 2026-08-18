@@ -48,9 +48,9 @@ describe('ExploreCloudSystem helpers', () => {
     expect(first.length).toBeLessThanOrEqual(100)
     expect(second).toEqual(first)
     expect(first.every((seed) => seed.altitudeMeters > 1_000)).toBe(true)
-    expect(first.every((seed) => seed.depthMeters >= 5_000)).toBe(true)
+    expect(first.every((seed) => seed.depthMeters >= 3_000)).toBe(true)
     expect(first.every((seed) => seed.scaleX >= 70_000)).toBe(true)
-    expect(first.every((seed) => seed.alpha > 0 && seed.alpha <= 0.96)).toBe(true)
+    expect(first.every((seed) => seed.alpha > 0 && seed.alpha <= 1)).toBe(true)
   })
 
   it('uses NASA cloud-top height when available while preserving deterministic horizontal structure', () => {
@@ -61,6 +61,20 @@ describe('ExploreCloudSystem helpers', () => {
     expect(seeds.length).toBeGreaterThan(0)
     expect(seeds.every((seed) => seed.altitudeMeters + seed.depthMeters * 0.5 <= 10_001)).toBe(true)
     expect(seeds.every((seed) => seed.altitudeMeters + seed.depthMeters * 0.5 >= 9_999)).toBe(true)
-    expect(seeds.every((seed) => seed.depthMeters >= 2_000)).toBe(true)
+    expect(seeds.every((seed) => seed.depthMeters >= 1_500)).toBe(true)
+  })
+
+  it('uses NASA optical thickness to make dense clouds deeper and more opaque', () => {
+    const observedPatch = () => 0.52
+    const cloudTopHeight = () => 11_000
+    const thin = createExploreCloudSeeds(0, 0, 5, observedPatch, 50, cloudTopHeight, () => 1)
+    const thick = createExploreCloudSeeds(0, 0, 5, observedPatch, 50, cloudTopHeight, () => 60)
+
+    expect(thin.length).toBeGreaterThan(0)
+    expect(thick.length).toBe(thin.length)
+    expect(thick[0].density).toBeGreaterThan(thin[0].density)
+    expect(thick[0].depthMeters).toBeGreaterThan(thin[0].depthMeters)
+    expect(thick[0].alpha).toBeGreaterThan(thin[0].alpha)
+    expect(thick[0].altitudeMeters + thick[0].depthMeters * 0.5).toBeCloseTo(11_000, -1)
   })
 })
