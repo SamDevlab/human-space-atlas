@@ -30,7 +30,7 @@ const CLOUD_MAP_START_METERS = 220_000
 const CLOUD_MAP_FULL_ABOVE_METERS = 330_000
 const CLOUD_FAR_FIELD_MAX_ALPHA = 1
 
-export const EXPLORE_CLOUD_DISCLOSURE = 'NASA observed cloud field + cloud-top height + optical thickness · cinematic bounded 3D reconstruction'
+export const EXPLORE_CLOUD_DISCLOSURE = 'NASA observed cloud field + cloud-top height + optical thickness · cinematic shaded 3D reconstruction'
 
 export type ExploreCloudSeed = {
   longitudeDeg: number
@@ -120,14 +120,12 @@ export function exploreCloudRadiusDegrees(cameraHeightMeters: number): number {
   return clamp(7 + safeHeight / 110_000, CLOUD_REGION_MIN_RADIUS_DEGREES, CLOUD_REGION_MAX_RADIUS_DEGREES)
 }
 
-/** Kept for API/test compatibility. Explore V3 shades clouds directly and no longer builds ellipse shadow geometry. */
 export function cloudShadowOpacity(density: number, sunlight: number, opacity: number, volumeFade: number): number {
   const lit = smoothstep01((clamp(finite(sunlight, 0), 0, 1) - 0.08) / 0.72)
   const dense = smoothstep01((clamp(finite(density, 0), 0, 1) - 0.12) / 0.78)
   return clamp(finite(opacity, 0), 0, 1) * clamp(finite(volumeFade, 0), 0, 1) * lit * dense * 0.08
 }
 
-/** Compatibility helper retained for tests/documentation. */
 export function cloudShadowOffsetMeters(cloudAltitudeMeters: number, sunElevationSin: number): number {
   const altitude = Math.max(0, finite(cloudAltitudeMeters, 0))
   const elevationSin = clamp(finite(sunElevationSin, 0), 0, 1)
@@ -249,10 +247,10 @@ export function createExploreCloudSeeds(
 }
 
 /**
- * Creates separated vertical layers from one observed macro field. The layers
- * overlap enough to read as one formation, while their altitude separation
- * creates parallax and an actual sense of thickness when the camera pitches
- * toward the horizon.
+ * Creates separated vertical layers from one observed macro field. The base is
+ * broader and darker, the body carries most of the opacity, and dense systems
+ * receive a brighter raised crown. That vertical luminance gradient makes the
+ * same native Cesium clouds read as actual thickness instead of flat sprites.
  */
 export function createCloudVolumeParts(seed: ExploreCloudSeed): ExploreCloudVolumePart[] {
   const latitudeCosine = Math.max(0.3, Math.cos(seed.latitudeDeg * Math.PI / 180))
@@ -262,31 +260,31 @@ export function createCloudVolumeParts(seed: ExploreCloudSeed): ExploreCloudVolu
   const offsetMeters = clamp(5_000 + seed.scaleX * 0.055, 5_000, 14_000)
   const latitudeOffset = Math.sin(angle) * offsetMeters / 111_320
   const longitudeOffset = Math.cos(angle) * offsetMeters / (111_320 * latitudeCosine)
-  const lowerAltitude = Math.max(180, seed.altitudeMeters - seed.depthMeters * 0.26)
-  const upperAltitude = Math.min(20_000, seed.altitudeMeters + seed.depthMeters * 0.28)
+  const lowerAltitude = Math.max(180, seed.altitudeMeters - seed.depthMeters * 0.28)
+  const upperAltitude = Math.min(20_000, seed.altitudeMeters + seed.depthMeters * 0.31)
 
   const parts: ExploreCloudVolumePart[] = [
     {
       longitudeDeg: seed.longitudeDeg,
       latitudeDeg: seed.latitudeDeg,
       altitudeMeters: lowerAltitude,
-      scaleX: clamp(seed.scaleX * 1.08, 24_000, 185_000),
-      scaleY: clamp(seed.scaleY * 1.04, 20_000, 155_000),
-      depthMeters: clamp(seed.depthMeters * 0.42, 800, 6_000),
-      slice: clamp(seed.slice - 0.07, 0.28, 0.6),
-      alphaScale: 0.58,
-      brightnessScale: 0.95,
+      scaleX: clamp(seed.scaleX * 1.1, 24_000, 185_000),
+      scaleY: clamp(seed.scaleY * 1.06, 20_000, 155_000),
+      depthMeters: clamp(seed.depthMeters * 0.44, 800, 6_200),
+      slice: clamp(seed.slice - 0.08, 0.28, 0.6),
+      alphaScale: 0.64,
+      brightnessScale: 0.82,
     },
     {
       longitudeDeg: wrapCloudLongitude(seed.longitudeDeg + longitudeOffset * 0.32),
       latitudeDeg: clamp(seed.latitudeDeg + latitudeOffset * 0.32, -82, 82),
       altitudeMeters: seed.altitudeMeters,
-      scaleX: clamp(seed.scaleX * 0.8, 24_000, 150_000),
-      scaleY: clamp(seed.scaleY * 0.8, 20_000, 130_000),
-      depthMeters: clamp(seed.depthMeters * 0.78, 1_000, 9_000),
+      scaleX: clamp(seed.scaleX * 0.82, 24_000, 150_000),
+      scaleY: clamp(seed.scaleY * 0.82, 20_000, 130_000),
+      depthMeters: clamp(seed.depthMeters * 0.8, 1_000, 9_000),
       slice: seed.slice,
-      alphaScale: 0.88,
-      brightnessScale: 1,
+      alphaScale: 0.92,
+      brightnessScale: 0.97,
     },
   ]
 
@@ -299,8 +297,8 @@ export function createCloudVolumeParts(seed: ExploreCloudSeed): ExploreCloudVolu
       scaleY: clamp(seed.scaleY * (0.42 + seed.density * 0.08), 16_000, 90_000),
       depthMeters: clamp(seed.depthMeters * (0.42 + seed.density * 0.16), 900, 7_000),
       slice: clamp(seed.slice + 0.07, 0.38, 0.72),
-      alphaScale: 0.68,
-      brightnessScale: 1.03,
+      alphaScale: 0.72,
+      brightnessScale: 1.08,
     })
   }
 
@@ -362,8 +360,8 @@ export class ExploreCloudSystem {
       if (this.destroyed || generation !== this.loadGeneration || this.viewer.isDestroyed()) return
       const layer = this.viewer.imageryLayers.addImageryProvider(provider)
       layer.alpha = 0
-      layer.brightness = 1.1
-      layer.contrast = 1.17
+      layer.brightness = 1.11
+      layer.contrast = 1.2
       layer.saturation = 0.9
       layer.show = false
       this.viewer.imageryLayers.raiseToTop(layer)
@@ -478,17 +476,19 @@ export class ExploreCloudSystem {
       )
       this.collection.removeAll()
 
-      const renderedAlpha = clamp(this.opacity * (1.06 + volumeFade * 0.14) * volumeFade, 0, 1)
-      const dayColor = Color.fromCssColorString('#f8fbff')
-      const nightColor = Color.fromCssColorString('#68859e')
+      const renderedAlpha = clamp(this.opacity * (1.07 + volumeFade * 0.15) * volumeFade, 0, 1)
+      const dayColor = Color.fromCssColorString('#fbfdff')
+      const nightColor = Color.fromCssColorString('#607a92')
+      const twilightColor = Color.fromCssColorString('#fff2dd')
       let partCount = 0
 
       for (const seed of seeds) {
         const centerPosition = Cartesian3.fromDegrees(seed.longitudeDeg, seed.latitudeDeg, seed.altitudeMeters)
-        const sunlight = computeOrbitalLighting(this.viewer.clock.currentTime, centerPosition).sunlight
-        const twilight = 1 - Math.abs(sunlight - 0.5) * 2
-        const denseTint = 1 - seed.density * 0.07
+        const sunlight = clamp(computeOrbitalLighting(this.viewer.clock.currentTime, centerPosition).sunlight, 0, 1)
+        const twilight = Math.max(0, 1 - Math.abs(sunlight - 0.5) * 2)
+        const denseTint = 1 - seed.density * 0.075
         const baseColor = Color.lerp(nightColor, dayColor, sunlight, new Color())
+        if (twilight > 0.05) Color.lerp(baseColor, twilightColor, twilight * 0.08, baseColor)
         baseColor.red *= denseTint
         baseColor.green *= denseTint
         baseColor.blue *= denseTint
@@ -496,12 +496,18 @@ export class ExploreCloudSystem {
         for (const part of createCloudVolumeParts(seed)) {
           if (partCount >= CLOUD_MAX_PARTS) break
           if (part.scaleX <= 0 || part.scaleY <= 0 || part.depthMeters <= 0) continue
+          const verticalPosition = clamp((part.altitudeMeters - (seed.altitudeMeters - seed.depthMeters * 0.4)) / Math.max(1, seed.depthMeters * 0.8), 0, 1)
           const color = Color.clone(baseColor, new Color())
-          color.alpha = clamp(seed.alpha * renderedAlpha * part.alphaScale * (0.82 + sunlight * 0.18), 0, 1)
+          const verticalShade = 0.86 + verticalPosition * 0.14
+          color.red *= verticalShade
+          color.green *= verticalShade
+          color.blue *= 0.98 + verticalPosition * 0.03
+          color.alpha = clamp(seed.alpha * renderedAlpha * part.alphaScale * (0.8 + sunlight * 0.2), 0, 1)
+          const silverLining = twilight * verticalPosition * 0.11
           const brightness = clamp(
-            seed.brightness * part.brightnessScale * (0.28 + sunlight * 0.72) + Math.max(0, twilight) * 0.07,
-            0.2,
-            1.1,
+            seed.brightness * part.brightnessScale * (0.27 + sunlight * 0.73) + silverLining,
+            0.18,
+            1.12,
           )
           this.collection.add({
             position: Cartesian3.fromDegrees(part.longitudeDeg, part.latitudeDeg, part.altitudeMeters),
@@ -520,9 +526,6 @@ export class ExploreCloudSystem {
       this.commitRebuildState(longitudeDeg, latitudeDeg, altitudeMeters, volumeFade)
       this.viewer.scene.requestRender()
     } catch (error) {
-      // A malformed upstream sample or transient Cesium allocation must never
-      // kill the whole renderer. Drop the local volume and leave the stable
-      // far-field NASA layer visible for this frame/region.
       console.warn('Explore cloud rebuild skipped after recoverable error', error)
       this.collection.removeAll()
       this.collection.show = false
