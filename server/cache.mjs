@@ -11,10 +11,26 @@ const diskEnabled = process.env.NODE_ENV !== 'test' && process.env.HSA_CACHE_DIS
 const cacheDirectory = process.env.HSA_CACHE_DIR
   ?? (process.env.VERCEL ? path.join(tmpdir(), 'human-space-atlas-cache') : path.join(process.cwd(), '.cache', 'human-space-atlas'))
 const REMOTE_PREFIX = 'hsa:v2:'
+const parsedMemoryMaxEntries = Number(process.env.HSA_CACHE_MEMORY_MAX_ENTRIES ?? 256)
+const memoryMaxEntries = Number.isFinite(parsedMemoryMaxEntries)
+  ? Math.max(16, Math.min(4096, Math.floor(parsedMemoryMaxEntries)))
+  : 256
 
 function filePathForKey(key) {
   const digest = createHash('sha256').update(key).digest('hex')
   return path.join(cacheDirectory, `${digest}.json`)
+}
+
+function remember(key, entry) {
+  // Map preserves insertion order. Reinsert hits so eviction approximates LRU
+  // without adding another dependency to the small API proxy.
+  memory.delete(key)
+  memory.set(key, entry)
+  while (memory.size > memoryMaxEntries) {
+    const oldest = memory.keys().next().value
+    if (oldest === undefined) break
+    memory.delete(oldest)
+  }
 }
 
 async function remoteCommand(command) {
@@ -75,24 +91,27 @@ async function writeDisk(key, entry) {
 
 export async function getCacheEntry(key) {
   const memoryEntry = memory.get(key)
-  if (memoryEntry) return memoryEntry
+  if (memoryEntry) {
+    remember(key, memoryEntry)
+    return memoryEntry
+  }
 
   const remoteEntry = await readRemote(key)
   if (remoteEntry) {
-    memory.set(key, remoteEntry)
+    remember(key, remoteEntry)
     return remoteEntry
   }
 
   const diskEntry = await readDisk(key)
   if (diskEntry) {
-    memory.set(key, diskEntry)
+    remember(key, diskEntry)
     return diskEntry
   }
   return null
 }
 
 export async function setCacheEntry(key, entry, retentionMs) {
-  memory.set(key, entry)
+  remember(key, entry)
   await Promise.allSettled([
     writeDisk(key, entry),
     writeRemote(key, entry, retentionMs),
@@ -119,6 +138,8 @@ export function resetCacheStore() {
 export function cacheCapabilities() {
   return {
     memory: true,
+    memoryEntries: memory.size,
+    memoryMaxEntries,
     disk: diskEnabled,
     remote: Boolean(remoteUrl && remoteToken),
   }
