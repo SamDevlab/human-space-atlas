@@ -1,7 +1,53 @@
 import { pathToFileURL } from 'node:url'
-import { createApp } from './app.mjs'
+import {
+  createApp as createBaseApp,
+  fetchWithCache,
+  resetCache as resetBaseCache,
+} from './app.mjs'
+import {
+  checkRequestRateLimit,
+  rateLimitHeaders,
+  resetRateLimitStore,
+} from './rateLimit.mjs'
 
-export { createApp, fetchWithCache, resetCache } from './app.mjs'
+export { fetchWithCache }
+
+export function resetCache() {
+  resetBaseCache()
+  resetRateLimitStore()
+}
+
+function rejectRateLimited(res, result) {
+  res.writeHead(429, {
+    'content-type': 'application/json; charset=utf-8',
+    'access-control-allow-origin': '*',
+    'cache-control': 'no-store',
+    ...rateLimitHeaders(result),
+  })
+  res.end(JSON.stringify({ error: 'Too many requests' }))
+}
+
+export function createApp() {
+  const server = createBaseApp()
+  const requestListeners = server.listeners('request')
+  server.removeAllListeners('request')
+
+  server.on('request', (req, res) => {
+    if (req.method !== 'OPTIONS' && req.url) {
+      const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
+      const result = checkRequestRateLimit(req, url.pathname)
+      if (result && !result.allowed) {
+        return rejectRateLimited(res, result)
+      }
+    }
+
+    for (const listener of requestListeners) {
+      listener.call(server, req, res)
+    }
+  })
+
+  return server
+}
 
 const PORT = Number(process.env.PORT ?? 8787)
 
