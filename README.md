@@ -1,75 +1,119 @@
 # Human Space Atlas
 
-A web-based 3D atlas of **human-made objects in space**. The project combines a scientific Earth-orbit catalog with a cinematic Explore mode while keeping observed data and reconstructed visual effects clearly separated.
+**Human Space Atlas (HSA)** é um atlas 3D web de objetos artificiais no espaço, combinando catálogo orbital, visualização científica, contexto terrestre e uma camada de exploração cinematográfica.
 
-## Current state
+O projeto foi desenhado com uma separação explícita entre **dados observados**, **posições calculadas a partir de elementos orbitais** e **reconstruções visuais**. Essa distinção é parte da arquitetura, não apenas um aviso de interface.
 
-### Orbital atlas
+## Em 30 segundos
 
-- CesiumJS 3D Earth with multiple base-map styles.
-- CelesTrak OMM/JSON ingestion through the project API.
-- `satellite.js` / SGP4 propagation in a Web Worker.
-- Typed transferable position buffers and deterministic adaptive render density.
-- `PointPrimitiveCollection` bulk rendering rather than one React component per satellite.
-- Search/filtering across the loaded catalog, selected-object inspection and orbit trail.
-- Simulation clock controls and synchronized object tracking.
-- Terrain with Cesium World Terrain when configured and ArcGIS elevation fallback.
-- NASA EONET Earth events and optional OpenSky aircraft context.
+- visualização 3D em **CesiumJS**;
+- catálogo orbital via **CelesTrak OMM/JSON**;
+- propagação **SGP4** usando `satellite.js` em Web Worker;
+- renderização em escala com `PointPrimitiveCollection` e buffers transferíveis;
+- NASA/NOAA para fenômenos terrestres e clima espacial;
+- JPL Horizons para vetores heliocêntricos de missões profundas;
+- previsão de passagens, reentry watch e close-approach screening não operacional;
+- cache stale-while-revalidate para resiliência das fontes externas;
+- testes com Vitest e Playwright.
+
+## Arquitetura
+
+```mermaid
+flowchart TD
+    A[CelesTrak OMM/JSON] --> B[API / cache]
+    B --> C[Orbital catalog]
+    C --> D[Web Worker]
+    D --> E[SGP4 propagation]
+    E --> F[Typed transferable buffers]
+    F --> G[CesiumJS renderer]
+
+    H[NASA / NOAA] --> B
+    I[JPL Horizons] --> B
+    J[NASA EONET / optional OpenSky] --> B
+
+    G --> K[Atlas]
+    G --> L[Explore]
+    G --> M[Orbital Intelligence]
+```
+
+## Integridade científica
+
+| O que aparece no HSA | O que representa |
+|---|---|
+| posição orbital animada | propagação SGP4 calculada a partir de elementos orbitais públicos, não telemetria direta |
+| nuvens / aurora | dados observacionais usados para orientar uma reconstrução visual, não geometria 3D medida diretamente |
+| conjunction screening | triagem geométrica baseada em catálogo público, não probabilidade operacional de colisão |
+| re-entry watch | sinais derivados de elementos públicos; o sistema não fabrica horário de reentrada |
+| catálogo carregado | subconjunto de objetos públicos conhecidos; não implica cobertura de objetos classificados ou não catalogados |
+
+## Estado atual
+
+### Atlas orbital
+
+- CesiumJS 3D Earth com múltiplos estilos de mapa;
+- ingestão CelesTrak OMM/JSON pela API do projeto;
+- propagação SGP4 em Web Worker;
+- buffers transferíveis tipados e densidade adaptativa determinística;
+- renderização em lote com `PointPrimitiveCollection`;
+- busca, filtros, inspeção de objeto selecionado e trilha orbital;
+- relógio de simulação e tracking sincronizado;
+- Cesium World Terrain quando configurado, com fallback de elevação ArcGIS;
+- eventos terrestres NASA EONET e contexto opcional de aeronaves OpenSky.
 
 ### Earth Experience
 
-- NASA GIBS cloud fraction for observed macro cloud placement.
-- NASA MODIS Cloud Top Height for observed cloud altitude.
-- NASA MODIS Cloud Optical Thickness for density/depth cues.
-- Atlas cloud presentation designed to avoid a global fog layer.
-- Explore uses bounded native Cesium cloud volumes with separated vertical layers for real low-orbit parallax.
-- Explore volumetric clouds hand off completely to the stable NASA far-field map before ~360 km; malformed/non-finite samples are rejected before reaching Cesium.
-- NASA VIIRS night-light overlay, hidden in daylight and faded in only after imagery tiles stabilize.
-- NOAA SWPC OVATION aurora forecast rendered as cinematic auroral curtains.
-- Orbital sunlight / penumbra / eclipse lighting and enhanced sunrise/sunset atmosphere.
+- NASA GIBS Cloud Fraction para distribuição macro de nuvens;
+- NASA MODIS Cloud Top Height para altitude observada;
+- NASA MODIS Cloud Optical Thickness como sinal de densidade;
+- nuvens volumétricas limitadas no Explore, separadas do mapa estável de campo distante;
+- handoff das nuvens volumétricas antes de ~360 km;
+- rejeição de amostras malformadas ou não finitas antes de chegar ao Cesium;
+- NASA VIIRS night lights com transição após estabilização dos tiles;
+- NOAA SWPC OVATION para aurora;
+- iluminação orbital com luz solar, penumbra/eclipses e atmosfera aprimorada.
 
 ### Explore
 
-- Third-person fictional HSA Explorer spacecraft, kept conceptually separate from real catalog objects.
-- 6DOF-style flight controls, throttle/boost, camera orbit/zoom and camera presets.
-- Cinematic camera drift when the user is hands-off.
-- Synchronization with a selected real object for observation.
-- No weapons, combat, economy or XP systems.
+- nave fictícia HSA Explorer, separada conceitualmente dos objetos reais;
+- controles de voo 6DOF-style, throttle/boost, órbita/zoom de câmera e presets;
+- drift cinematográfico quando não há entrada do usuário;
+- sincronização com objeto real selecionado para observação;
+- sem armas, combate, economia ou XP.
 
-### Texture streaming / renderer stability
+### Renderer e streaming
 
-- Coarse imagery ancestors are warmed before a map provider becomes active.
-- Warmed imagery providers are reused when switching back to a style.
-- Warm-up requests are bounded and adapt to limited/data-saver devices.
-- Explore prefetches a throttled 3x3 tile neighborhood ahead of the camera.
-- VIIRS waits for stable globe tiles before becoming visible.
-- Cesium rendering collections are never monkey-patched for transition effects; an earlier experimental patch was removed after it could corrupt imagery state under concurrent refinement.
-- Visual QA matrix: [`docs/EARTH-VISUAL-QA.md`](docs/EARTH-VISUAL-QA.md).
+- ancestrais coarse de imagery são aquecidos antes da ativação do provider;
+- providers aquecidos são reutilizados ao alternar estilos;
+- warm-up é limitado e adaptado a dispositivos restritos/data-saver;
+- Explore prefetches uma vizinhança 3x3 à frente da câmera;
+- VIIRS espera estabilidade do globo antes de aparecer;
+- coleções internas do Cesium não são monkey-patched para transições;
+- matriz de QA visual em [`docs/EARTH-VISUAL-QA.md`](docs/EARTH-VISUAL-QA.md).
 
-### Orbital Intelligence — Stage B
+## Orbital Intelligence
 
-Open **INTEL** from the lower-left corner of the app.
+Abra **INTEL** no canto inferior esquerdo da aplicação.
 
-- Observer-location pass prediction for the next 24 hours from current public OMM/SGP4 elements.
-- NASA Deep Space Network and ESA ESTRACK station presets.
-- Browser geolocation support for local pass prediction.
-- Close-approach / conjunction screening against the loaded public catalog, explicitly labelled as non-operational because covariance/CDM data is not available.
-- Orbital-decay / re-entry watch derived from mean motion, eccentricity, BSTAR and catalog `DECAY_DATE` when present; the UI does not fabricate re-entry timestamps.
-- Curated deep-space spacecraft registry.
-- Live heliocentric vectors through NASA/JPL Horizons.
-- Log-scale Solar System map with selected mission, Earth, planetary orbit guides, heliocentric speed and Earth-relative distance.
+Recursos atuais:
 
-### Backend cache
+- previsão de passagens nas próximas 24 horas;
+- presets NASA Deep Space Network e ESA ESTRACK;
+- geolocalização do navegador para observador local;
+- close-approach screening explicitamente marcado como não operacional;
+- orbital-decay / re-entry watch usando mean motion, eccentricity, BSTAR e `DECAY_DATE` quando disponível;
+- registro curado de missões deep-space;
+- vetores heliocêntricos via NASA/JPL Horizons;
+- mapa logarítmico do Sistema Solar com órbitas de referência, velocidade heliocêntrica e distância relativa à Terra.
 
-The API uses stale-while-revalidate semantics with multiple cache levels:
+## Backend e cache
 
-1. in-memory cache for the active process;
-2. filesystem cache when writable;
-3. optional Upstash Redis REST / Vercel KV-compatible REST cache in production.
+A API usa stale-while-revalidate em camadas:
 
-When an upstream provider is temporarily unavailable, the API can continue serving the last valid cached observation within its stale retention window instead of immediately breaking the experience.
+1. memória do processo;
+2. filesystem quando gravável;
+3. Upstash Redis REST / Vercel KV-compatible REST opcional.
 
-Supported environment variables are documented in `.env.example`.
+Quando uma fonte externa falha temporariamente, a API pode continuar servindo a última observação válida dentro da janela de retenção configurada.
 
 ## Stack
 
@@ -78,11 +122,11 @@ Supported environment variables are documented in `.env.example`.
 - satellite.js / SGP4
 - Node built-in HTTP/fetch API
 - Vitest
-- Playwright for browser/performance/visual smoke harnesses
+- Playwright
 
 ## Quick start
 
-Requirements: Node.js 22.13+.
+Requisito: Node.js 22.13+.
 
 ```bash
 cp .env.example .env
@@ -90,35 +134,32 @@ npm install
 npm run dev
 ```
 
-The web UI normally starts on `http://localhost:5173` and the local API on `http://localhost:8787`.
+UI: `http://localhost:5173`  
+API local: `http://localhost:8787`
 
-### Optional Cesium ion token
+### Cesium ion opcional
 
 ```env
 VITE_CESIUM_ION_TOKEN=your_public_read_token
 ```
 
-Do not put private-scope secrets in a browser environment variable.
+Não coloque secrets de escopo privado em variáveis expostas ao browser.
 
-### Optional durable cache
-
-For serverless deployments, configure either pair:
+### Cache remoto opcional
 
 ```env
 UPSTASH_REDIS_REST_URL=
 UPSTASH_REDIS_REST_TOKEN=
 ```
 
-or:
+ou:
 
 ```env
 KV_REST_API_URL=
 KV_REST_API_TOKEN=
 ```
 
-Without a remote cache, the server still uses memory plus a best-effort filesystem cache.
-
-## API endpoints
+## Endpoints
 
 ```text
 GET /api/health
@@ -132,9 +173,7 @@ GET /api/aircraft/states
 GET /api/horizons?command=<JPL_COMMAND>&start=2026-08-16&stop=2026-08-17&step=1%20h
 ```
 
-The Horizons adapter is now used by the Stage B deep-space workbench. A dedicated full-screen 3D Solar System reference frame remains a later M3 refinement.
-
-## Validation
+## Validação
 
 ```bash
 npm test
@@ -143,26 +182,26 @@ npm run check:server
 npm run build
 ```
 
-With the development server running:
+Com o servidor de desenvolvimento em execução:
 
 ```bash
 npm run smoke:earth
 ```
 
-Browser smoke screenshots are written to `artifacts/earth-smoke/`.
+Screenshots de smoke são gravados em `artifacts/earth-smoke/`.
 
-## Data-source principles
+## Princípios de dados
 
-1. Prefer modern OMM/JSON contracts over TLE-only assumptions.
-2. Cache upstream data and serve the last valid observation during temporary provider outages.
-3. Label propagated positions honestly: orbital animation is computed from public orbital elements, not direct spacecraft telemetry.
-4. Preserve source/observation metadata so freshness can be judged.
-5. NASA/NOAA data controls observed macro phenomena; cinematic 3D reconstruction must not be presented as measured 3D geometry.
-6. Conjunction screening based on public elements must not be presented as an operational collision probability.
-7. Never imply that public catalogs contain every physical or classified object.
+1. preferir contratos OMM/JSON modernos a suposições TLE-only;
+2. preservar metadados de fonte e observação;
+3. cachear upstreams e usar a última observação válida durante falhas temporárias;
+4. nunca chamar posição propagada de telemetria direta;
+5. não apresentar reconstrução cinematográfica como geometria observada;
+6. não apresentar screening público como collision probability operacional;
+7. não sugerir cobertura total de objetos físicos ou classificados.
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the remaining product phases.
+Veja [`docs/ROADMAP.md`](docs/ROADMAP.md) para as próximas fases.
 
-## License
+## Licença
 
-MIT for this repository's code. External data, imagery and APIs retain their own terms and attribution requirements.
+MIT para o código deste repositório. Dados, imagens e APIs externas mantêm seus próprios termos e requisitos de atribuição.
