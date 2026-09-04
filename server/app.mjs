@@ -14,6 +14,11 @@ const AIRCRAFT_CACHE_TTL_MS = 15 * 1000
 const AURORA_CACHE_TTL_MS = 5 * 60 * 1000
 const CATALOG_GROUPS = new Set(['stations', 'active', 'starlink', 'gps-ops'])
 const EONET_STATUSES = new Set(['open', 'closed', 'all'])
+const HORIZONS_STEPS = new Set(['1 h', '6 h', '12 h', '1 d'])
+const HORIZONS_MAX_RANGE_DAYS = 90
+const HORIZONS_COMMAND_PATTERN = /^-?\d{1,6}$/
+const HORIZONS_CENTER_PATTERN = /^\d{1,6}@-?\d{1,6}$/
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 
 export function resetCache() {
   resetCacheStore()
@@ -50,7 +55,7 @@ async function refreshJson(key, url, ttl, staleRetentionMs) {
       signal: AbortSignal.timeout(30_000),
     })
 
-    if (!response.ok) throw new Error(`Upstream ${response.status}: ${await response.text()}`)
+    if (!response.ok) throw new Error(`Upstream ${response.status}`)
     const value = await response.json()
     const now = Date.now()
     const fetchedAt = new Date(now).toISOString()
@@ -108,23 +113,47 @@ async function handleCatalog(url, res) {
   }, publicCacheHeaders(CACHE_TTL_MS))
 }
 
-async function handleHorizons(url, res) {
-  const command = url.searchParams.get('command')
-  if (!command) return json(res, 400, { error: 'Missing command parameter' })
+function parseIsoDate(value) {
+  if (!ISO_DATE_PATTERN.test(value)) return null
+  const timestamp = Date.parse(`${value}T00:00:00Z`)
+  return Number.isFinite(timestamp) ? timestamp : null
+}
 
-  const start = url.searchParams.get('start') ?? new Date().toISOString().slice(0, 10)
-  const stop = url.searchParams.get('stop') ?? new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
-  const step = url.searchParams.get('step') ?? '1 h'
-  const center = url.searchParams.get('center') ?? '500@10'
+export function validateHorizonsQuery(url) {
+  const command = (url.searchParams.get('command') ?? '').trim()
+  if (!command) return { error: 'Missing command parameter' }
+  if (!HORIZONS_COMMAND_PATTERN.test(command)) return { error: 'Invalid command parameter' }
+
+  const start = (url.searchParams.get('start') ?? new Date().toISOString().slice(0, 10)).trim()
+  const stop = (url.searchParams.get('stop') ?? new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)).trim()
+  const step = (url.searchParams.get('step') ?? '1 h').trim()
+  const center = (url.searchParams.get('center') ?? '500@10').trim()
+
+  const startMs = parseIsoDate(start)
+  const stopMs = parseIsoDate(stop)
+  if (startMs === null || stopMs === null) return { error: 'Invalid start/stop date' }
+  if (stopMs <= startMs) return { error: 'stop must be after start' }
+  if ((stopMs - startMs) / 86_400_000 > HORIZONS_MAX_RANGE_DAYS) {
+    return { error: `Horizons range exceeds ${HORIZONS_MAX_RANGE_DAYS} days` }
+  }
+  if (!HORIZONS_STEPS.has(step)) return { error: 'Unsupported step', allowed: [...HORIZONS_STEPS] }
+  if (!HORIZONS_CENTER_PATTERN.test(center)) return { error: 'Invalid center parameter' }
+
+  return { command, start, stop, step, center }
+}
+
+async function handleHorizons(url, res) {
+  const query = validateHorizonsQuery(url)
+  if (query.error) return json(res, 400, query)
 
   const upstream = new URL('https://ssd.jpl.nasa.gov/api/horizons.api')
   upstream.searchParams.set('format', 'json')
-  upstream.searchParams.set('COMMAND', `'${command}'`)
+  upstream.searchParams.set('COMMAND', `'${query.command}'`)
   upstream.searchParams.set('EPHEM_TYPE', 'VECTORS')
-  upstream.searchParams.set('CENTER', `'${center}'`)
-  upstream.searchParams.set('START_TIME', `'${start}'`)
-  upstream.searchParams.set('STOP_TIME', `'${stop}'`)
-  upstream.searchParams.set('STEP_SIZE', `'${step}'`)
+  upstream.searchParams.set('CENTER', `'${query.center}'`)
+  upstream.searchParams.set('START_TIME', `'${query.start}'`)
+  upstream.searchParams.set('STOP_TIME', `'${query.stop}'`)
+  upstream.searchParams.set('STEP_SIZE', `'${query.step}'`)
   upstream.searchParams.set('OUT_UNITS', 'KM-S')
 
   const ttl = 60 * 60 * 1000
@@ -276,7 +305,6 @@ export function createApp() {
       console.error(error)
       return json(res, 502, {
         error: 'Upstream data source unavailable',
-        detail: error instanceof Error ? error.message : String(error),
       })
     }
   })
