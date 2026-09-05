@@ -32,10 +32,10 @@ export function createApp() {
   const requestListeners = server.listeners('request')
   server.removeAllListeners('request')
 
-  server.on('request', (req, res) => {
+  server.on('request', async (req, res) => {
     if (req.method !== 'OPTIONS' && req.url) {
       const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
-      const result = checkRequestRateLimit(req, url.pathname)
+      const result = await checkRequestRateLimit(req, url.pathname)
       if (result && !result.allowed) {
         return rejectRateLimited(res, result)
       }
