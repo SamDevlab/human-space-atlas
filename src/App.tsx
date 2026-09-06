@@ -75,7 +75,7 @@ function App() {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
   const [eventViewRequest, setEventViewRequest] = useState(0)
   const [eventViewPosition, setEventViewPosition] = useState<Cartesian3 | null>(null)
-  const [explorationActive, setExplorationActive] = useState(true)
+  const [explorationActive, setExplorationActive] = useState(false)
   const [exploreUiOpen, setExploreUiOpen] = useState(false)
   const [exploreNavOpen, setExploreNavOpen] = useState(false)
   const [exploreNavQuery, setExploreNavQuery] = useState('')
